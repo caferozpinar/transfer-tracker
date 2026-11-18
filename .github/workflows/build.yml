@@ -1,0 +1,51 @@
+name: Build Windows EXE & Run Tests
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-build:
+    name: Test & Compile Windows EXE
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Run Automated Unit Tests
+        run: deno task test
+
+      - name: Compile Single-File Windows Executable (GemiTransferTakip.exe)
+        run: deno task build:win
+
+      - name: Upload Windows EXE as Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GemiTransferTakip-Windows-x64
+          path: dist/GemiTransferTakip.exe
+          if-no-files-found: error
+
+      - name: Publish to GitHub Releases (on version tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/GemiTransferTakip.exe
+          generate_release_notes: true

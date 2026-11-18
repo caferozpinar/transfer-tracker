@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#297e98" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Gemi Transfer &amp; Cari Takip</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- TOP HEADER -->
+  <header class="app-header">
+    <div class="brand-row">
+      <div class="brand-title">
+        <span class="brand-icon" aria-hidden="true">⚓</span>
+        <div>
+          <h1>Gemi Transfer &amp; Cari Takip</h1>
+          <p class="subtitle" id="headerSubtitle">Firma ve Gemi Operasyon Yönetimi</p>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <button type="button" class="btn btn-outline btn-sm" id="btnNetworkModal" aria-label="Tailscale ve Telefon Bağlantısı">
+          📱 <span class="hide-xs">Telefondan Bağlan</span>
+        </button>
+        <button type="button" class="btn btn-outline btn-sm" id="btnExcelModal" aria-label="Excel İçe ve Dışa Aktar">
+          📊 <span class="hide-xs">Excel İndir / Yükle</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- MAIN NAVIGATION TABS (Desktop & Top Bar) -->
+    <div class="top-controls-bar">
+      <nav class="main-nav" aria-label="Ana Ekran Sekmeleri">
+        <button type="button" class="nav-tab active" data-view="operations" id="tabOperations">
+          🚢 Gemi Tabloları (İşlemler)
+        </button>
+        <button type="button" class="nav-tab" data-view="ledger" id="tabLedger">
+          💰 Girdi-Çıktı (Cari &amp; Ödemeler)
+        </button>
+      </nav>
+
+      <!-- DATE FILTER BAR -->
+      <div class="filter-bar">
+        <label class="filter-item">
+          <span>Başlangıç:</span>
+          <input type="date" id="filterStartDate" />
+        </label>
+        <label class="filter-item">
+          <span>Bitiş:</span>
+          <input type="date" id="filterEndDate" />
+        </label>
+        <button type="button" class="btn btn-ghost btn-sm" id="btnClearFilter" title="Tarih filtresini sıfırla">
+          Temizle
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- GLOBAL SUMMARY STRIP (Genel / Firma / Gemi Toplam Özeti) -->
+  <section class="summary-strip" aria-label="Toplam Ücretlendirme Özeti">
+    <div class="summary-strip-card">
+      <div class="strip-label" id="shipSummaryTitle">SEÇİLİ GEMİ TOPLAMI</div>
+      <div class="strip-values" id="shipSummaryValues">₺0,00</div>
+    </div>
+    <div class="summary-strip-card">
+      <div class="strip-label" id="companySummaryTitle">SEÇİLİ FİRMA TOPLAMI</div>
+      <div class="strip-values" id="companySummaryValues">₺0,00</div>
+    </div>
+    <div class="summary-strip-card strip-highlight">
+      <div class="strip-label">GENEL TOPLAM (TÜM FİRMALAR)</div>
+      <div class="strip-values" id="overallSummaryValues">₺0,00</div>
+    </div>
+  </section>
+
+  <!-- MAIN WORKSPACE -->
+  <main class="main-container">
+    <!-- ==================== VIEW 1: OPERATIONS (GEMİ TABLOLARI) ==================== -->
+    <section id="viewOperations" class="view-section active">
+      <!-- COMPANY & SHIP SELECTOR BAR -->
+      <div class="selector-panel">
+        <div class="company-selector-group">
+          <label for="selectCompany" class="selector-label">FİRMA:</label>
+          <select id="selectCompany" class="select-control"></select>
+          <button type="button" class="btn btn-secondary btn-sm" id="btnAddCompany">+ Firma Ekle</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="btnEditCompany" title="Firmayı Düzenle / Sil">⚙️</button>
+        </div>
+
+        <div class="ship-tabs-wrapper">
+          <div class="ship-tabs-list" id="shipTabsList" role="tablist" aria-label="Firma Gemileri">
+            <!-- Dinamik Gemi Sekmeleri -->
+          </div>
+          <div class="ship-actions">
+            <button type="button" class="btn btn-secondary btn-sm" id="btnAddShip">+ Gemi Ekle</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="btnEditShip" title="Seçili Gemiyi Düzenle / Sil">⚙️</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ACTION TOOLBAR ABOVE TABLE -->
+      <div class="table-toolbar">
+        <div class="toolbar-left">
+          <h2 id="activeShipHeading" class="ship-heading"></h2>
+          <span class="record-badge" id="activeRecordCount">0 Kayıt</span>
+        </div>
+        <div class="toolbar-right">
+          <div class="view-mode-switcher" role="group" aria-label="Görünüm Modu">
+            <button type="button" class="btn btn-sm mode-btn active" data-mode="auto" id="btnModeAuto">Otomatik</button>
+            <button type="button" class="btn btn-sm mode-btn" data-mode="table" id="btnModeTable">Excel Tablo</button>
+            <button type="button" class="btn btn-sm mode-btn" data-mode="cards" id="btnModeCards">Mobil Kart</button>
+          </div>
+          <button type="button" class="btn btn-primary" id="btnOpenRecordModal">
+            + Yeni İşlem Ekle
+          </button>
+        </div>
+      </div>
+
+      <!-- DESKTOP EXCEL-LIKE TABLE WRAPPER -->
+      <div tabindex="0" role="region" aria-labelledby="activeShipHeading" class="excel-table-container" id="excelTableContainer">
+        <table class="excel-table" id="recordsTable">
+          <thead>
+            <tr>
+              <th>TARİH</th>
+              <th>KALKIŞ</th>
+              <th>VARIŞ</th>
+              <th>GEMİ ADI</th>
+              <th>KİŞİ SAYISI</th>
+              <th>TRANSFER ÜCRETİ</th>
+              <th>OTEL</th>
+              <th>YEMEK</th>
+              <th>TOTAL</th>
+              <th>ODA DETAYI</th>
+              <th class="col-actions">İŞLEM</th>
+            </tr>
+          </thead>
+          <tbody id="recordsTableBody">
+            <!-- JS ile doldurulur -->
+          </tbody>
+          <tfoot>
+            <tr class="excel-QuickAddRow" id="desktopQuickAddRow">
+              <td><input type="text" id="qaDate" placeholder="25.10.2026" aria-label="Tarih" /></td>
+              <td><input type="text" id="qaDeparture" list="dlLocations" placeholder="IGA / ZEYPORT" aria-label="Kalkış" /></td>
+              <td><input type="text" id="qaArrival" list="dlLocations" placeholder="VARIŞ" aria-label="Varış" /></td>
+              <td>
+                <select id="qaCurrency" aria-label="Para Birimi" title="Para Birimi">
+                  <option value="TRY">₺ TRY</option>
+                  <option value="USD">$ USD</option>
+                  <option value="EUR">€ EUR</option>
+                </select>
+              </td>
+              <td><input type="text" id="qaPassenger" list="dlPassengers" placeholder="2 KİŞİ TEKNİSYEN" aria-label="Kişi Sayısı" /></td>
+              <td><input type="number" step="0.01" id="qaTransfer" placeholder="Transfer (X)" inputmode="decimal" aria-label="Transfer Ücreti" /></td>
+              <td><input type="number" step="0.01" id="qaHotel" placeholder="Otel (X)" inputmode="decimal" aria-label="Otel Ücreti" /></td>
+              <td><input type="number" step="0.01" id="qaMeal" placeholder="Yemek (X)" inputmode="decimal" aria-label="Yemek Ücreti" /></td>
+              <td><input type="number" step="0.01" id="qaExtra" placeholder="Ek/Doğrudan Tutar" inputmode="decimal" aria-label="Doğrudan veya Ek Tutar" title="Ayakbastı, GBT, Personel Değişimi gibi doğrudan TOTAL'e yazılan ücretler" /></td>
+              <td><input type="text" id="qaDescription" list="dlDescriptions" placeholder="TRANSFER / AYAKBASTI" aria-label="Oda Detayı / Açıklama" /></td>
+              <td>
+                <button type="button" class="btn btn-primary btn-sm" id="btnQuickAddSubmit" title="Satırı Kaydet (Enter)">Ekle</button>
+              </td>
+            </tr>
+            <tr class="excel-total-row">
+              <td colspan="5" class="excel-total-label">TOTAL</td>
+              <td colspan="4" class="excel-total-value" id="tableFooterTotal">₺0,00</td>
+              <td colspan="2" class="excel-total-tail"></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <!-- MOBILE / PRACTICAL CARDS CONTAINER -->
+      <div class="mobile-cards-container" id="mobileCardsContainer">
+        <!-- JS ile doldurulur -->
+      </div>
+    </section>
+
+    <!-- ==================== VIEW 2: LEDGER (GİRDİ-ÇIKTI / CARİ HESAP) ==================== -->
+    <section id="viewLedger" class="view-section">
+      <div class="ledger-header-row">
+        <div>
+          <h2>Girdi-Çıktı &amp; Cari Hesap Takibi</h2>
+          <p class="muted-text">
+            Firmalara yapılan işlerin toplam tutarlarını, gemi bazlı dağılımını, alınan ödemeleri ve kalan alacak bakiyelerini para birimi bazında (`₺`, `$`, `€`) takip edin.
+          </p>
+        </div>
+        <button type="button" class="btn btn-primary" id="btnOpenPaymentModal">
+          + Ödeme (Tahsilat) Gir
+        </button>
+      </div>
+
+      <!-- OVERALL LEDGER CARDS -->
+      <div class="ledger-overview-grid">
+        <div class="ledger-stat-card stat-billed">
+          <div class="stat-label">TOPLAM YAPILAN İŞ (ALACAK)</div>
+          <div class="stat-values" id="ledgerOverallBilled">₺0,00</div>
+        </div>
+        <div class="ledger-stat-card stat-paid">
+          <div class="stat-label">TOPLAM ALINAN ÖDEME (TAHSİLAT)</div>
+          <div class="stat-values" id="ledgerOverallPaid">₺0,00</div>
+        </div>
+        <div class="ledger-stat-card stat-remaining">
+          <div class="stat-label">TOPLAM KALAN ALACAK (BAKİYE)</div>
+          <div class="stat-values" id="ledgerOverallRemaining">₺0,00</div>
+        </div>
+      </div>
+
+      <!-- COMPANY LEDGER CARDS & TABLES -->
+      <div id="ledgerCompaniesContainer" class="ledger-companies-list">
+        <!-- JS ile her firma için yapılan işler, gemi kırılımı, alınan ödemeler ve kalan bakiye listelenir -->
+      </div>
+
+      <!-- PAYMENT HISTORY SECTION -->
+      <div class="payment-history-panel">
+        <div class="panel-header">
+          <h3>Alınan Ödemeler Geçmişi (Tahsilat Listesi)</h3>
+          <select id="ledgerFilterCompany" class="select-control select-sm" aria-label="Firma Filtresi">
+            <option value="">Tüm Firmalar</option>
+          </select>
+        </div>
+        <div tabindex="0" role="region" aria-label="Ödeme Geçmişi Tablosu" class="table-scroll">
+          <table class="clean-table">
+            <thead>
+              <tr>
+                <th>TARİH</th>
+                <th>FİRMA</th>
+                <th>GEMİ (OPSİYONEL)</th>
+                <th>AÇIKLAMA / NOT</th>
+                <th>ALINAN TUTAR</th>
+                <th>İŞLEM</th>
+              </tr>
+            </thead>
+            <tbody id="paymentsTableBody">
+              <!-- JS ile doldurulur -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- MOBILE BOTTOM NAVIGATION BAR -->
+  <nav class="mobile-bottom-bar" aria-label="Mobil Alt Menü">
+    <button type="button" class="bottom-nav-btn active" data-bottom-view="operations" id="mNavOperations">
+      <span class="nav-icon" aria-hidden="true">🚢</span>
+      <span>Gemiler</span>
+    </button>
+    <button type="button" class="bottom-nav-fab" id="mNavQuickAdd" aria-label="Hızlı İşlem Ekle">
+      <span>+ İşlem Ekle</span>
+    </button>
+    <button type="button" class="bottom-nav-btn" data-bottom-view="ledger" id="mNavLedger">
+      <span class="nav-icon" aria-hidden="true">💰</span>
+      <span>Girdi-Çıktı</span>
+    </button>
+  </nav>
+
+  <!-- AUTOCOMPLETE DATALISTS -->
+  <datalist id="dlLocations"></datalist>
+  <datalist id="dlPassengers"></datalist>
+  <datalist id="dlDescriptions"></datalist>
+
+  <!-- ==================== MODAL 1: ADD / EDIT RECORD (MOBILE-FRIENDLY FORM) ==================== -->
+  <dialog id="modalRecord" class="app-modal">
+    <form id="formRecord" method="dialog" class="modal-content">
+      <div class="modal-header">
+        <h3 id="modalRecordTitle">Yeni Operasyon / İşlem Kaydı</h3>
+        <button type="button" class="icon-close" data-close-modal="modalRecord" aria-label="Kapat">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <input type="hidden" id="recId" />
+
+        <!-- QUICK PRESET CHIPS FOR MOBILE SPEED -->
+        <div class="preset-section">
+          <span class="field-hint">Hızlı İşlem Tipi Seçimi (Dokunmatik Pratik Giriş):</span>
+          <div class="chip-group" id="presetTypeChips">
+            <button type="button" class="chip" data-preset="TRANSFER">🚐 TRANSFER</button>
+            <button type="button" class="chip" data-preset="AYAKBASTI">⚓ AYAKBASTI</button>
+            <button type="button" class="chip" data-preset="GBT">🪪 GBT</button>
+            <button type="button" class="chip" data-preset="PERSONEL DEĞİŞİMİ">🔄 PERSONEL DEĞİŞİMİ</button>
+            <button type="button" class="chip" data-preset="1 TWIN ROOM">🏨 1 TWIN ROOM</button>
+            <button type="button" class="chip" data-preset="1 SINGLE ROOM">🛏️ 1 SINGLE ROOM</button>
+          </div>
+        </div>
+
+        <div class="form-grid-2">
+          <label class="form-field">
+            <span>Tarih (Boş bırakılırsa üst satıra bağlanır)</span>
+            <input type="date" id="recDatePicker" />
+          </label>
+          <label class="form-field">
+            <span>Para Birimi</span>
+            <select id="recCurrency">
+              <option value="TRY">₺ Türk Lirası (TRY)</option>
+              <option value="USD">$ Amerikan Doları (USD)</option>
+              <option value="EUR">€ Euro (EUR)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="form-grid-2">
+          <div class="form-field">
+            <label for="recDeparture">Kalkış Yeri</label>
+            <input type="text" id="recDeparture" list="dlLocations" placeholder="Örn: IGA, ZEYPORT" />
+            <div class="mini-chips" data-target-input="recDeparture">
+              <button type="button" class="mini-chip">IGA</button>
+              <button type="button" class="mini-chip">ZEYPORT</button>
+              <button type="button" class="mini-chip">TASHAN</button>
+              <button type="button" class="mini-chip">FATİH</button>
+              <button type="button" class="mini-chip">EYLÜL BOT</button>
+            </div>
+          </div>
+
+          <div class="form-field">
+            <label for="recArrival">Varış Yeri</label>
+            <input type="text" id="recArrival" list="dlLocations" placeholder="Örn: ZEYPORT, SİRKECİ" />
+            <div class="mini-chips" data-target-input="recArrival">
+              <button type="button" class="mini-chip">ZEYPORT</button>
+              <button type="button" class="mini-chip">SİRKECİ</button>
+              <button type="button" class="mini-chip">TASHAN</button>
+              <button type="button" class="mini-chip">IGA</button>
+              <button type="button" class="mini-chip">EYLÜL - İGA</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-field">
+          <label for="recPassenger">Kişi Sayısı / Personel Bilgisi</label>
+          <input type="text" id="recPassenger" list="dlPassengers" placeholder="Örn: 2 KİŞİ TEKNİSYEN" />
+          <div class="mini-chips" data-target-input="recPassenger">
+            <button type="button" class="mini-chip">2 KİŞİ TEKNİSYEN</button>
+            <button type="button" class="mini-chip">2 KİŞİ AYRILAN</button>
+            <button type="button" class="mini-chip">1 TEKNİSYEN</button>
+          </div>
+        </div>
+
+        <div class="fee-box">
+          <div class="fee-box-title">Ücret Kalemleri (Boş bırakılanlar tabloda <strong>X</strong> olarak görünür)</div>
+          <div class="form-grid-4">
+            <label class="form-field">
+              <span>Transfer Ücreti</span>
+              <input type="number" step="0.01" id="recTransfer" inputmode="decimal" placeholder="0" />
+            </label>
+            <label class="form-field">
+              <span>Otel Ücreti</span>
+              <input type="number" step="0.01" id="recHotel" inputmode="decimal" placeholder="0" />
+            </label>
+            <label class="form-field">
+              <span>Yemek Ücreti</span>
+              <input type="number" step="0.01" id="recMeal" inputmode="decimal" placeholder="0" />
+            </label>
+            <label class="form-field highlight-field">
+              <span>Doğrudan / Ek Tutar</span>
+              <input type="number" step="0.01" id="recExtra" inputmode="decimal" placeholder="Ayakbastı/GBT vb." />
+            </label>
+          </div>
+          <div class="live-total-preview">
+            <span>Hesaplanan Satır TOTAL:</span>
+            <strong id="recLiveTotal">₺0,00</strong>
+          </div>
+        </div>
+
+        <div class="form-field">
+          <label for="recDescription">Oda Detayı / İşlem Açıklaması</label>
+          <input type="text" id="recDescription" list="dlDescriptions" placeholder="Örn: TRANSFER, AYAKBASTI, GBT, 1 TWIN ROOM" />
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn btn-ghost" data-close-modal="modalRecord">İptal</button>
+        <button type="submit" class="btn btn-primary">Kaydet</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ==================== MODAL 2: ADD PAYMENT (TAHSİLAT GİRİŞİ) ==================== -->
+  <dialog id="modalPayment" class="app-modal">
+    <form id="formPayment" method="dialog" class="modal-content">
+      <div class="modal-header">
+        <h3>Firmadan Alınan Ödeme (Tahsilat) Girişi</h3>
+        <button type="button" class="icon-close" data-close-modal="modalPayment" aria-label="Kapat">✕</button>
+      </div>
+      <div class="modal-body">
+        <label class="form-field">
+          <span>Firma Seçin</span>
+          <select id="payCompany" required></select>
+        </label>
+        <label class="form-field">
+          <span>Gemi (Opsiyonel — Firma geneli için boş bırakabilirsiniz)</span>
+          <select id="payShip">
+            <option value="">-- Firma Geneli Ödeme --</option>
+          </select>
+        </label>
+        <div class="form-grid-2">
+          <label class="form-field">
+            <span>Ödeme Tarihi</span>
+            <input type="date" id="payDate" required />
+          </label>
+          <label class="form-field">
+            <span>Para Birimi</span>
+            <select id="payCurrency" required>
+              <option value="TRY">₺ Türk Lirası (TRY)</option>
+              <option value="USD">$ Amerikan Doları (USD)</option>
+              <option value="EUR">€ Euro (EUR)</option>
+            </select>
+          </label>
+        </div>
+        <label class="form-field">
+          <span>Alınan Ödeme Tutarı</span>
+          <input type="number" step="0.01" id="payAmount" inputmode="decimal" placeholder="Örn: 25000" required />
+        </label>
+        <label class="form-field">
+          <span>Açıklama / Ödeme Notu</span>
+          <input type="text" id="payNote" placeholder="Örn: Banka Havalesi, Nakit Tahsilat..." />
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-ghost" data-close-modal="modalPayment">İptal</button>
+        <button type="submit" class="btn btn-primary">Ödemeyi Kaydet</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ==================== MODAL 3: EXCEL IMPORT / EXPORT ==================== -->
+  <dialog id="modalExcel" class="app-modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>📊 Excel (.xlsx) İndir / Yükle</h3>
+        <button type="button" class="icon-close" data-close-modal="modalExcel" aria-label="Kapat">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="excel-box">
+          <h4>1. Excel Olarak Dışa Aktar (İndir)</h4>
+          <p class="muted-text">Mevcut tabloyu paylaştığınız Excel formatında (`X` işaretleri ve `TOTAL` satırıyla) bilgisayarınıza veya telefonunuza indirin.</p>
+          <div class="btn-row">
+            <button type="button" class="btn btn-primary" id="btnExportActiveShip">Seçili Gemiyi İndir (.xlsx)</button>
+            <button type="button" class="btn btn-secondary" id="btnExportActiveCompany">Seçili Firmanın Tüm Gemilerini İndir (.xlsx)</button>
+          </div>
+        </div>
+
+        <hr class="divider" />
+
+        <form id="formExcelImport" class="excel-box">
+          <h4>2. Mevcut Excel Dosyasını İçeri Aktar (Yükle)</h4>
+          <p class="muted-text">Bilgisayarınızdaki veya telefonunuzdaki `.xlsx` dosyasını seçin; gemi adı ve satırlar otomatik olarak mevcut firmaya eklensin.</p>
+          <label class="form-field">
+            <span>Excel Dosyası (.xlsx)</span>
+            <input type="file" id="excelFileInput" accept=".xlsx,.xls" required />
+          </label>
+          <button type="submit" class="btn btn-secondary">Excel Dosyasını Yükle</button>
+        </form>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================== MODAL 4: TAILSCALE & MOBILE CONNECTION INFO ==================== -->
+  <dialog id="modalNetwork" class="app-modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>📱 Tailscale &amp; Telefon Erişim Bilgileri</h3>
+        <button type="button" class="icon-close" data-close-modal="modalNetwork" aria-label="Kapat">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="network-status-box">
+          <div class="net-item">
+            <span class="net-label">Tailscale Telefon Adresi:</span>
+            <code id="netTailscaleUrl" class="net-code">Yükleniyor...</code>
+          </div>
+          <div class="net-item">
+            <span class="net-label">Yerel Ağ (Wi-Fi) Adresi:</span>
+            <code id="netLanUrl" class="net-code">-</code>
+          </div>
+          <div class="net-item">
+            <span class="net-label">Bu Bilgisayar:</span>
+            <code id="netLocalUrl" class="net-code">http://localhost:8080</code>
+          </div>
+        </div>
+        <p class="muted-text">
+          Bilgisayarınızda ve telefonunuzda <strong>Tailscale</strong> açık olduğu sürece, nerede olursanız olun (farklı internette veya mobil veride bile) yukarıdaki <strong>Tailscale Telefon Adresi</strong>ni telefonunuzun tarayıcısına yazarak tüm tablolarınıza erişebilir ve veri girebilirsiniz.
+        </p>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

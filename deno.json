@@ -1,0 +1,12 @@
+{
+  "tasks": {
+    "dev": "deno run --allow-all --watch src/server.ts",
+    "start": "deno run --allow-all src/server.ts",
+    "test": "deno test --allow-all tests/app_test.ts",
+    "build:win": "deno compile --allow-all --target x86_64-pc-windows-msvc --include public --output dist/GemiTransferTakip.exe src/server.ts",
+    "build:linux": "deno compile --allow-all --target x86_64-unknown-linux-gnu --include public --output dist/gemi-transfer-takip src/server.ts"
+  },
+  "compilerOptions": {
+    "strict": true
+  }
+}

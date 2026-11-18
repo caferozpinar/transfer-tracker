@@ -1,0 +1,7 @@
+dist/
+*.db
+*.db-wal
+*.db-shm
+*.exe
+node_modules/
+.DS_Store

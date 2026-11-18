@@ -1,10 +1,8 @@
-// Gemi Transfer & Cari Takip — Frontend Logic (Desktop + Mobile Adaptive)
+// Gemi Transfer Takip — arayüz mantığı
 
-const CURRENCY_SYM = {
-  TRY: "₺",
-  USD: "$",
-  EUR: "€",
-};
+const CURRENCY_SYM = { TRY: "₺", USD: "$", EUR: "€" };
+const CURRENCIES = ["TRY", "USD", "EUR"];
+const SEL_KEY = "gtt.selection";
 
 const state = {
   companies: [],
@@ -16,12 +14,15 @@ const state = {
   activeCompanyId: null,
   activeShipId: null,
   activeView: "operations", // 'operations' | 'ledger'
-  displayMode: "auto",      // 'auto' | 'table' | 'cards'
   startDate: "",
   endDate: "",
+  openCompanies: new Set(),
+  pendingDoc: null,
 };
 
-// --- Formatting Helpers ---
+const $ = (id) => document.getElementById(id);
+
+// --- Biçimlendirme ---
 function fmtNumber(val, decimals = 2) {
   return new Intl.NumberFormat("tr-TR", {
     minimumFractionDigits: decimals,
@@ -29,45 +30,34 @@ function fmtNumber(val, decimals = 2) {
   }).format(Number(val) || 0);
 }
 
-function fmtCellMoney(val, currency = "TRY") {
+// Tablo hücresi: 0 ise soluk "–", değilse "4.000 ₺"
+function fmtCell(val, currency = "TRY") {
   const num = Number(val) || 0;
-  if (num === 0) return "X";
-  const sym = CURRENCY_SYM[currency] || "₺";
-  const hasDec = num % 1 !== 0;
-  return `${fmtNumber(num, hasDec ? 2 : 0)} ${sym}`;
+  if (num === 0) return `<span class="zero">–</span>`;
+  return `${fmtNumber(num, num % 1 !== 0 ? 2 : 0)} ${CURRENCY_SYM[currency] || "₺"}`;
 }
 
 function fmtExactMoney(val, currency = "TRY") {
-  const num = Number(val) || 0;
-  const sym = CURRENCY_SYM[currency] || "₺";
-  return `${sym}${fmtNumber(num, 2)}`;
+  return `${CURRENCY_SYM[currency] || "₺"}${fmtNumber(val, 2)}`;
 }
 
-function renderCurrencyTotalsHtml(totals, showZeroTry = true) {
-  if (!totals) return `<span class="currency-pill curr-TRY">₺0,00</span>`;
-  const pills = [];
-  for (const curr of ["TRY", "USD", "EUR"]) {
-    const val = Number(totals[curr] || 0);
-    if (val !== 0) {
-      pills.push(
-        `<span class="currency-pill curr-${curr}">${fmtExactMoney(val, curr)}</span>`
-      );
-    }
-  }
-  if (pills.length === 0 && showZeroTry) {
-    return `<span class="currency-pill curr-TRY">₺0,00</span>`;
-  }
-  return pills.join(" ");
+function pillsHtml(totals) {
+  const pills = CURRENCIES.filter((c) => Number(totals?.[c] || 0) !== 0).map(
+    (c) => `<span class="pill curr-${c}">${fmtExactMoney(totals[c], c)}</span>`,
+  );
+  return pills.length ? pills.join("") : `<span class="pill">₺0,00</span>`;
+}
+
+function isoToDisplay(iso) {
+  const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : String(iso || "");
 }
 
 function toIsoInputDate(displayDate) {
   const s = (displayDate || "").trim();
   const m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
-  if (m) {
-    return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
-  }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  return "";
+  if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : "";
 }
 
 function escapeHtml(str) {
@@ -78,361 +68,326 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
-// --- API Wrapper ---
+// --- Bildirim (toast) ---
+let toastTimer;
+function notify(message, isError = false) {
+  const el = $("toast");
+  el.textContent = message;
+  el.className = isError ? "toast error" : "toast";
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.hidden = true), isError ? 6000 : 3000);
+}
+
+// --- API ---
 async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
   const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || "İşlem sırasında hata oluştu.");
-  }
+  if (!res.ok) throw new Error(data.error || "İşlem sırasında hata oluştu.");
   return data;
 }
 
-// --- Data Loading ---
-async function refreshAll() {
-  const params = new URLSearchParams();
-  if (state.startDate) params.set("start_date", state.startDate);
-  if (state.endDate) params.set("end_date", state.endDate);
+function dateParams() {
+  const p = new URLSearchParams();
+  if (state.startDate) p.set("start_date", state.startDate);
+  if (state.endDate) p.set("end_date", state.endDate);
+  return p;
+}
 
+// Tarayıcı kendi başına indirir; dosya ve hata durumunu kullanıcıya göstermek için fetch kullanılır.
+async function downloadPdf(path, fallbackName) {
+  notify("PDF hazırlanıyor…");
+  try {
+    const q = dateParams().toString();
+    const res = await fetch(`/api/pdf/${path}${q ? `?${q}` : ""}`);
+    if (!res.ok) {
+      let msg = "PDF oluşturulamadı.";
+      try {
+        msg = (await res.json()).error || msg;
+      } catch { /* JSON değil */ }
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = fallbackName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+    notify(`PDF indirildi: ${fallbackName}`);
+  } catch (err) {
+    notify(err.message, true);
+  }
+}
+
+function pdfFor(kind, companyId = state.activeCompanyId) {
+  const comp = state.companies.find((c) => c.id === companyId);
+  const safe = (s) => String(s || "").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "");
+  if (kind === "ship") {
+    const ship = state.ships.find((s) => s.id === state.activeShipId);
+    if (!ship) return notify("Önce bir gemi seçin.", true);
+    return downloadPdf(`ship/${ship.id}`, `${safe(ship.name)}-detay.pdf`);
+  }
+  if (!comp) return notify("Önce bir firma seçin.", true);
+  const suffix = kind === "company-financial" ? "mali-durum" : "detay";
+  downloadPdf(`company/${comp.id}/${kind === "company-financial" ? "financial" : "detail"}`, `${safe(comp.name)}-${suffix}.pdf`);
+}
+
+// --- Seçimi hatırla ---
+function saveSelection() {
+  try {
+    localStorage.setItem(SEL_KEY, JSON.stringify({ c: state.activeCompanyId, s: state.activeShipId }));
+  } catch { /* depolama kapalı olabilir */ }
+}
+function loadSelection() {
+  try {
+    return JSON.parse(localStorage.getItem(SEL_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+// --- Veri yükleme ---
+async function refreshAll() {
+  const params = dateParams();
   const [companies, ships, summary, autocomplete] = await Promise.all([
     api("/api/companies"),
     api("/api/ships"),
     api(`/api/summary?${params.toString()}`),
     api("/api/autocomplete"),
   ]);
-
   state.companies = companies;
   state.ships = ships;
   state.summary = summary;
 
-  // Ensure valid activeCompanyId
-  if (!state.activeCompanyId || !companies.some((c) => c.id === state.activeCompanyId)) {
-    state.activeCompanyId = companies.length > 0 ? companies[0].id : null;
+  const stored = loadSelection();
+  const hasData = (cid) => summary.companies.find((c) => c.company_id === cid)?.ships.some((s) => s.record_count > 0);
+  if (!companies.some((c) => c.id === state.activeCompanyId)) {
+    state.activeCompanyId = companies.some((c) => c.id === stored.c)
+      ? stored.c
+      : (companies.find((c) => hasData(c.id)) ?? companies[0])?.id ?? null;
+    state.activeShipId = stored.c === state.activeCompanyId ? stored.s : null;
   }
 
-  // Ensure valid activeShipId for the activeCompanyId
   const companyShips = ships.filter((s) => s.company_id === state.activeCompanyId);
-  if (!state.activeShipId || !companyShips.some((s) => s.id === state.activeShipId)) {
-    state.activeShipId = companyShips.length > 0 ? companyShips[0].id : null;
+  if (!companyShips.some((s) => s.id === state.activeShipId)) {
+    const counts = summary.companies.find((c) => c.company_id === state.activeCompanyId)?.ships ?? [];
+    const withRecords = companyShips.find((s) => counts.find((x) => x.ship_id === s.id)?.record_count > 0);
+    state.activeShipId = (withRecords ?? companyShips[0])?.id ?? null;
   }
+  saveSelection();
 
-  // Load records for activeShipId
   if (state.activeShipId) {
-    const recParams = new URLSearchParams(params);
-    recParams.set("ship_id", String(state.activeShipId));
-    state.records = await api(`/api/records?${recParams.toString()}`);
+    const rp = new URLSearchParams(params);
+    rp.set("ship_id", String(state.activeShipId));
+    state.records = await api(`/api/records?${rp.toString()}`);
   } else {
     state.records = [];
   }
 
-  // Load payments for ledger
   const payParams = new URLSearchParams(params);
-  const filterComp = document.getElementById("ledgerFilterCompany")?.value;
+  const filterComp = $("ledgerFilterCompany").value;
   if (filterComp) payParams.set("company_id", filterComp);
   state.payments = await api(`/api/payments?${payParams.toString()}`);
   state.documents = await api(`/api/documents${filterComp ? `?company_id=${filterComp}` : ""}`);
 
-  populateAutocomplete(autocomplete);
+  for (const [id, list] of [["dlLocations", autocomplete.locations], ["dlPassengers", autocomplete.passengers]]) {
+    $(id).innerHTML = (list || []).map((v) => `<option value="${escapeHtml(v)}"></option>`).join("");
+  }
   renderAll();
 }
 
-function populateAutocomplete(ac) {
-  const fill = (id, list) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.innerHTML = (list || []).map((v) => `<option value="${escapeHtml(v)}"></option>`).join("");
-  };
-  fill("dlLocations", ac.locations);
-  fill("dlPassengers", ac.passengers);
-  fill("dlDescriptions", ac.descriptions);
-}
-
-// --- Rendering ---
+// --- Çizim ---
 function renderAll() {
-  renderCompanyAndShipSelectors();
-  renderSummaryStrip();
-  renderOperationsTableAndCards();
-  renderLedgerView();
+  renderSelectors();
+  renderTotals();
+  renderOperations();
+  renderLedger();
+  $("filterSummary").textContent =
+    state.startDate || state.endDate
+      ? `Tarih aralığı: ${isoToDisplay(state.startDate) || "…"} – ${isoToDisplay(state.endDate) || "…"}`
+      : "Tarih aralığı: tümü";
 }
 
-function renderCompanyAndShipSelectors() {
-  const selectCompany = document.getElementById("selectCompany");
-  selectCompany.innerHTML = state.companies
-    .map(
-      (c) =>
-        `<option value="${c.id}" ${c.id === state.activeCompanyId ? "selected" : ""}>${escapeHtml(c.name)}</option>`
-    )
+function renderSelectors() {
+  $("selectCompany").innerHTML = state.companies
+    .map((c) => `<option value="${c.id}" ${c.id === state.activeCompanyId ? "selected" : ""}>${escapeHtml(c.name)}</option>`)
     .join("");
 
   const companyShips = state.ships.filter((s) => s.company_id === state.activeCompanyId);
-  const shipTabsList = document.getElementById("shipTabsList");
+  $("shipTabsList").innerHTML = companyShips.length
+    ? companyShips
+        .map((s) => `<button type="button" role="tab" class="ship-tab ${s.id === state.activeShipId ? "active" : ""}" data-ship-id="${s.id}">${escapeHtml(s.name)}</button>`)
+        .join("")
+    : `<span class="muted">Bu firmada gemi yok. "Gemi Ekle" ile ekleyin.</span>`;
 
-  if (companyShips.length === 0) {
-    shipTabsList.innerHTML = `<span class="muted-text">Bu firmaya ait gemi yok. "+ Gemi Ekle" butonunu kullanın.</span>`;
-  } else {
-    shipTabsList.innerHTML = companyShips
-      .map(
-        (s) =>
-          `<button type="button" role="tab" class="ship-tab ${s.id === state.activeShipId ? "active" : ""}" data-ship-id="${s.id}">
-            🚢 ${escapeHtml(s.name)}
-          </button>`
-      )
-      .join("");
-  }
-
-  const activeShip = companyShips.find((s) => s.id === state.activeShipId);
-  document.getElementById("activeShipHeading").textContent = activeShip ? activeShip.name : "GEMİ SEÇİLMEDİ";
-  document.getElementById("activeRecordCount").textContent = `${state.records.length} Kayıt`;
+  const ship = companyShips.find((s) => s.id === state.activeShipId);
+  $("activeShipHeading").textContent = ship ? ship.name : "Gemi seçilmedi";
+  $("activeRecordCount").textContent = `${state.records.length} kayıt`;
 }
 
-function renderSummaryStrip() {
-  if (!state.summary) return;
-  const compSum = state.summary.companies.find((c) => c.company_id === state.activeCompanyId);
-  const shipSum = compSum?.ships.find((s) => s.ship_id === state.activeShipId);
-
-  document.getElementById("shipSummaryTitle").textContent = shipSum
-    ? `GEMİ TOPLAMI (${shipSum.ship_name})`
-    : "SEÇİLİ GEMİ TOPLAMI";
-  document.getElementById("shipSummaryValues").innerHTML = renderCurrencyTotalsHtml(shipSum?.totals);
-
-  document.getElementById("companySummaryTitle").textContent = compSum
-    ? `FİRMA TOPLAMI (${compSum.company_name})`
-    : "SEÇİLİ FİRMA TOPLAMI";
-  document.getElementById("companySummaryValues").innerHTML = renderCurrencyTotalsHtml(compSum?.billed);
-
-  document.getElementById("overallSummaryValues").innerHTML = renderCurrencyTotalsHtml(
-    state.summary.overall_billed
-  );
+function renderTotals() {
+  const comp = state.summary.companies.find((c) => c.company_id === state.activeCompanyId);
+  const ship = comp?.ships.find((s) => s.ship_id === state.activeShipId);
+  $("shipSummaryTitle").textContent = ship ? `Gemi (${ship.ship_name})` : "Gemi";
+  $("shipSummaryValues").innerHTML = pillsHtml(ship?.totals);
+  $("companySummaryTitle").textContent = comp ? `Firma (${comp.company_name})` : "Firma";
+  $("companySummaryValues").innerHTML = pillsHtml(comp?.billed);
+  $("overallSummaryValues").innerHTML = pillsHtml(state.summary.overall_billed);
 }
 
-function renderOperationsTableAndCards() {
-  const tbody = document.getElementById("recordsTableBody");
-  const cardsContainer = document.getElementById("mobileCardsContainer");
-  const activeShip = state.ships.find((s) => s.id === state.activeShipId);
-  const shipName = activeShip ? activeShip.name : "-";
+function renderOperations() {
+  const tbody = $("recordsTableBody");
+  const cards = $("mobileCardsContainer");
 
   if (state.records.length === 0) {
-    tbody.innerHTML = `
-      <tr>
-        <td colspan="13" style="padding: 1.5rem; background:#fff; color:#475569;">
-          Bu gemide henüz kayıt bulunmuyor. Aşağıdaki satırdan veya <strong>+ Yeni İşlem Ekle</strong> butonundan ekleyebilirsiniz.
-        </td>
-      </tr>
-    `;
-    cardsContainer.innerHTML = `
-      <div class="op-card">
-        <p class="muted-text">Bu gemide henüz işlem kaydı yok. Alt menüdeki <strong>+ İşlem Ekle</strong> butonuna dokunarak pratik şekilde ekleyebilirsiniz.</p>
-      </div>
-    `;
-    document.getElementById("tableFooterTotal").textContent = "₺0,00";
+    const msg = state.activeShipId
+      ? "Bu gemide henüz kayıt yok. Aşağıdaki satırdan veya “Yeni İşlem” ile ekleyin."
+      : "Önce bir firma ve gemi ekleyin.";
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="13">${msg}</td></tr>`;
+    cards.innerHTML = `<div class="card muted">${msg}</div>`;
+    $("tableFooterTotal").innerHTML = pillsHtml(null);
     return;
   }
 
   tbody.innerHTML = state.records
     .map((r) => {
-      return `
-        <tr data-record-id="${r.id}">
-          <td>${escapeHtml(r.tx_date)}</td>
-          <td>${escapeHtml(r.departure)}</td>
-          <td>${escapeHtml(r.arrival)}</td>
-          <td class="cell-ship">${escapeHtml(r.ship_name || shipName)}</td>
-          <td>${escapeHtml(r.passenger_info)}</td>
-          <td>${fmtCellMoney(r.transfer_fee, r.currency)}</td>
-          <td>${fmtCellMoney(r.hotel_fee, r.currency)}</td>
-          <td>${fmtCellMoney(r.meal_fee, r.currency)}</td>
-          <td>${fmtCellMoney(r.igafi_fee, r.currency)}</td>
-          <td>${fmtCellMoney(r.vize_fee, r.currency)}</td>
-          <td class="cell-total">${fmtCellMoney(r.total_fee, r.currency)}</td>
-          <td class="cell-notes">${escapeHtml(r.description)}</td>
-          <td>
-            <div class="row-action-btns">
-              <button type="button" class="btn btn-secondary btn-sm" data-edit-record="${r.id}" title="Düzenle">✏️</button>
-              <button type="button" class="btn btn-danger btn-sm" data-delete-record="${r.id}" title="Sil">🗑️</button>
-            </div>
-          </td>
-        </tr>
-      `;
+      const c = r.currency;
+      const date = r.tx_date || `<span class="zero">${isoToDisplay(r.effective_date)}</span>`;
+      return `<tr>
+        <td>${date}</td>
+        <td>${escapeHtml(r.departure)}</td>
+        <td>${escapeHtml(r.arrival)}</td>
+        <td>${escapeHtml(r.passenger_info)}</td>
+        <td class="num">${fmtCell(r.transfer_fee, c)}</td>
+        <td class="num">${fmtCell(r.hotel_fee, c)}</td>
+        <td class="num">${fmtCell(r.meal_fee, c)}</td>
+        <td class="num">${fmtCell(r.igafi_fee, c)}</td>
+        <td class="num">${fmtCell(r.vize_fee, c)}</td>
+        <td class="num">${fmtCell(r.extra_fee, c)}</td>
+        <td class="num total">${fmtCell(r.total_fee, c)}</td>
+        <td class="notes">${escapeHtml(r.description)}</td>
+        <td><div class="row-actions">
+          <button type="button" class="btn btn-sm btn-quiet" data-edit-record="${r.id}">Düzenle</button>
+          <button type="button" class="btn btn-sm btn-quiet btn-danger" data-delete-record="${r.id}">Sil</button>
+        </div></td>
+      </tr>`;
     })
     .join("");
 
-  // Calculate footer totals by currency
-  const recTotals = { TRY: 0, USD: 0, EUR: 0 };
-  for (const r of state.records) {
-    const c = r.currency || "TRY";
-    recTotals[c] = (recTotals[c] || 0) + Number(r.total_fee || 0);
-  }
-  const totalParts = [];
-  for (const c of ["TRY", "USD", "EUR"]) {
-    if (recTotals[c] > 0) {
-      totalParts.push(fmtExactMoney(recTotals[c], c));
-    }
-  }
-  document.getElementById("tableFooterTotal").textContent =
-    totalParts.length > 0 ? totalParts.join("  |  ") : "₺0,00";
+  const totals = { TRY: 0, USD: 0, EUR: 0 };
+  for (const r of state.records) totals[r.currency] = (totals[r.currency] || 0) + Number(r.total_fee || 0);
+  $("tableFooterTotal").innerHTML = pillsHtml(totals);
 
-  // Render Mobile Cards
-  cardsContainer.innerHTML = state.records
+  cards.innerHTML = state.records
     .map((r) => {
-      const routeText =
-        r.departure || r.arrival
-          ? `${escapeHtml(r.departure || "-")} ➔ ${escapeHtml(r.arrival || "-")}`
-          : escapeHtml(r.passenger_info || r.ship_name || shipName);
-
-      const feeChips = [];
-      if (r.transfer_fee > 0) feeChips.push(`Transfer: ${fmtCellMoney(r.transfer_fee, r.currency)}`);
-      if (r.hotel_fee > 0) feeChips.push(`Otel: ${fmtCellMoney(r.hotel_fee, r.currency)}`);
-      if (r.meal_fee > 0) feeChips.push(`Yemek: ${fmtCellMoney(r.meal_fee, r.currency)}`);
-      if (r.igafi_fee > 0) feeChips.push(`İGAFİ: ${fmtCellMoney(r.igafi_fee, r.currency)}`);
-      if (r.vize_fee > 0) feeChips.push(`Vize: ${fmtCellMoney(r.vize_fee, r.currency)}`);
-      if (r.extra_fee > 0) feeChips.push(`Doğrudan: ${fmtCellMoney(r.extra_fee, r.currency)}`);
-
-      return `
-        <div class="op-card">
-          <div class="op-card-header">
-            <div class="op-card-meta">
-              <span class="op-date-badge">${escapeHtml(r.tx_date || r.effective_date || "Bağlı Satır")}</span>
-              <span class="op-desc-badge">${escapeHtml(r.description || "İŞLEM")}</span>
-            </div>
-            <div class="op-card-total">${fmtCellMoney(r.total_fee, r.currency)}</div>
-          </div>
-          <div class="op-card-route">${routeText}</div>
-          <div class="muted-text">${escapeHtml(r.passenger_info)} — <strong style="color:#d91b1b">${escapeHtml(r.ship_name || shipName)}</strong></div>
-          <div class="op-card-Breakdown">
-            <span>${feeChips.join(" • ")}</span>
-            <div class="row-action-btns">
-              <button type="button" class="btn btn-secondary btn-sm" data-edit-record="${r.id}">Düzenle</button>
-              <button type="button" class="btn btn-danger btn-sm" data-delete-record="${r.id}">Sil</button>
-            </div>
-          </div>
+      const c = r.currency;
+      const fees = [
+        ["Transfer", r.transfer_fee],
+        ["Otel", r.hotel_fee],
+        ["Yemek", r.meal_fee],
+        ["İGAFİ", r.igafi_fee],
+        ["Vize", r.vize_fee],
+        ["Ek", r.extra_fee],
+      ]
+        .filter(([, v]) => v > 0)
+        .map(([k, v]) => `<span>${k}: ${fmtCell(v, c)}</span>`)
+        .join("");
+      const route = r.departure || r.arrival ? `${escapeHtml(r.departure || "–")} → ${escapeHtml(r.arrival || "–")}` : "";
+      return `<div class="card">
+        <div class="card-top">
+          <span class="card-date">${escapeHtml(r.tx_date || isoToDisplay(r.effective_date) || "Önceki satıra bağlı")}</span>
+          <span class="card-total">${fmtCell(r.total_fee, c)}</span>
         </div>
-      `;
+        ${route ? `<div class="card-route">${route}</div>` : ""}
+        ${r.passenger_info ? `<div class="card-meta">${escapeHtml(r.passenger_info)}</div>` : ""}
+        ${fees ? `<div class="card-fees">${fees}</div>` : ""}
+        ${r.description ? `<div class="card-notes">${escapeHtml(r.description)}</div>` : ""}
+        <div class="card-actions">
+          <button type="button" class="btn btn-sm" data-edit-record="${r.id}">Düzenle</button>
+          <button type="button" class="btn btn-sm btn-danger" data-delete-record="${r.id}">Sil</button>
+        </div>
+      </div>`;
     })
     .join("");
-}
-
-function renderLedgerView() {
-  if (!state.summary) return;
-
-  document.getElementById("ledgerOverallBilled").innerHTML = renderCurrencyTotalsHtml(
-    state.summary.overall_billed
-  );
-  document.getElementById("ledgerOverallPaid").innerHTML = renderCurrencyTotalsHtml(
-    state.summary.overall_paid
-  );
-  document.getElementById("ledgerOverallRemaining").innerHTML = renderCurrencyTotalsHtml(
-    state.summary.overall_remaining
-  );
-
-  // Filter company dropdown in ledger
-  const filterSelect = document.getElementById("ledgerFilterCompany");
-  const currentFilterVal = filterSelect.value;
-  filterSelect.innerHTML =
-    `<option value="">Tüm Firmalar</option>` +
-    state.companies
-      .map(
-        (c) =>
-          `<option value="${c.id}" ${String(c.id) === String(currentFilterVal) ? "selected" : ""}>${escapeHtml(c.name)}</option>`
-      )
-      .join("");
-
-  const container = document.getElementById("ledgerCompaniesContainer");
-  container.innerHTML = state.summary.companies
-    .map((comp) => {
-      const shipsHtml =
-        comp.ships.length === 0
-          ? `<span class="muted-text">Gemi yok</span>`
-          : comp.ships
-              .map(
-                (s) => `
-                <button type="button" class="ship-mini-pill" data-jump-company="${comp.company_id}" data-jump-ship="${s.ship_id}">
-                  🚢 <strong>${escapeHtml(s.ship_name)}</strong> (${s.record_count} işlem): ${renderCurrencyTotalsHtml(s.totals)}
-                </button>
-              `
-              )
-              .join("");
-
-      return `
-        <div class="company-ledger-card">
-          <div class="company-ledger-top">
-            <div>
-              <h3>🏢 ${escapeHtml(comp.company_name)}</h3>
-              ${comp.contact_info ? `<p class="muted-text">${escapeHtml(comp.contact_info)}</p>` : ""}
-            </div>
-            <div class="row-action-btns">
-              <button type="button" class="btn btn-primary btn-sm" data-quick-pay-company="${comp.company_id}">
-                + Bu Firmadan Ödeme Al
-              </button>
-            </div>
-          </div>
-
-          <div class="company-ledger-metrics">
-            <div class="metric-box">
-              <div class="metric-title">TOPLAM YAPILAN İŞ (FİRMA ÖZELİ)</div>
-              <div class="metric-val">${renderCurrencyTotalsHtml(comp.billed)}</div>
-            </div>
-            <div class="metric-box">
-              <div class="metric-title">ALINAN ÖDEMELER (TAHSİLAT)</div>
-              <div class="metric-val">${renderCurrencyTotalsHtml(comp.paid)}</div>
-            </div>
-            <div class="metric-box metric-remaining">
-              <div class="metric-title">KALAN ALACAK (BAKİYE)</div>
-              <div class="metric-val">${renderCurrencyTotalsHtml(comp.remaining)}</div>
-            </div>
-          </div>
-
-          <div class="company-ships-mini">
-            ${shipsHtml}
-          </div>
-        </div>
-      `;
-    })
-    .join("");
-
-  // Render Payment History Table
-  const payTbody = document.getElementById("paymentsTableBody");
-  if (state.payments.length === 0) {
-    payTbody.innerHTML = `<tr><td colspan="7" class="muted-text">Henüz kayıtlı ödeme (tahsilat) bulunmuyor.</td></tr>`;
-  } else {
-    payTbody.innerHTML = state.payments
-      .map(
-        (p) => `
-        <tr>
-          <td><strong>${escapeHtml(p.payment_date)}</strong></td>
-          <td>${escapeHtml(p.company_name)}</td>
-          <td>${escapeHtml(p.ship_name || "Firma Geneli")}</td>
-          <td>${escapeHtml(p.note || "-")}</td>
-          <td><span class="currency-pill curr-${p.currency}">${fmtExactMoney(p.amount, p.currency)}</span></td>
-          <td>
-            ${state.documents.filter((d) => d.payment_id === p.id).map(docLinkHtml).join("")}
-            <button type="button" class="btn btn-ghost btn-sm" data-add-doc="dekont" data-doc-company="${p.company_id}" data-doc-payment="${p.id}">+ Dekont</button>
-          </td>
-          <td>
-            <button type="button" class="btn btn-danger btn-sm" data-delete-payment="${p.id}">Sil</button>
-          </td>
-        </tr>
-      `
-      )
-      .join("");
-  }
-  renderDocuments();
 }
 
 function docLinkHtml(d) {
-  return `<div><a href="/api/documents/${d.id}" target="_blank" rel="noopener">${escapeHtml(d.filename)}</a>
-    <button type="button" class="btn btn-ghost btn-sm" data-delete-doc="${d.id}" aria-label="Belgeyi sil">✕</button></div>`;
+  return `<span class="doc-link"><a href="/api/documents/${d.id}" target="_blank" rel="noopener">${escapeHtml(d.filename)}</a>
+    <button type="button" class="btn btn-sm btn-quiet" data-delete-doc="${d.id}" aria-label="${escapeHtml(d.filename)} belgesini sil">Sil</button></span>`;
 }
 
-function renderDocuments() {
+function renderLedger() {
+  const s = state.summary;
+  $("ledgerOverallBilled").innerHTML = pillsHtml(s.overall_billed);
+  $("ledgerOverallPaid").innerHTML = pillsHtml(s.overall_paid);
+  $("ledgerOverallRemaining").innerHTML = pillsHtml(s.overall_remaining);
+
+  const filter = $("ledgerFilterCompany");
+  const current = filter.value;
+  filter.innerHTML =
+    `<option value="">Tüm firmalar</option>` +
+    state.companies.map((c) => `<option value="${c.id}" ${String(c.id) === current ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("");
+
+  $("ledgerCompaniesContainer").innerHTML = s.companies.length
+    ? s.companies
+        .map((comp) => {
+          const open = state.openCompanies.has(comp.company_id) || s.companies.length === 1;
+          const ships = comp.ships.length
+            ? comp.ships
+                .map((sh) => `<div class="ship-line">
+                  <button type="button" data-jump-company="${comp.company_id}" data-jump-ship="${sh.ship_id}">${escapeHtml(sh.ship_name)}</button>
+                  <span>${sh.record_count} işlem · ${pillsHtml(sh.totals)}</span></div>`)
+                .join("")
+            : `<p class="muted">Bu firmada gemi yok.</p>`;
+          return `<details class="company" data-company="${comp.company_id}" ${open ? "open" : ""}>
+            <summary>
+              <span class="company-name">${escapeHtml(comp.company_name)}</span>
+              <span class="company-cell"><small>Yapılan iş</small>${pillsHtml(comp.billed)}</span>
+              <span class="company-cell"><small>Alınan ödeme</small>${pillsHtml(comp.paid)}</span>
+              <span class="company-cell"><small>Kalan</small>${pillsHtml(comp.remaining)}</span>
+            </summary>
+            <div class="company-body">
+              ${comp.contact_info ? `<p class="hint">${escapeHtml(comp.contact_info)}</p>` : ""}
+              ${ships}
+              <div class="company-actions">
+                <button type="button" class="btn btn-sm btn-primary" data-quick-pay-company="${comp.company_id}">Ödeme Ekle</button>
+                <button type="button" class="btn btn-sm" data-pdf-company="company-financial" data-company-id="${comp.company_id}">Mali durum PDF</button>
+                <button type="button" class="btn btn-sm" data-pdf-company="company-detail" data-company-id="${comp.company_id}">Tüm detaylar PDF</button>
+              </div>
+            </div>
+          </details>`;
+        })
+        .join("")
+    : `<p class="muted">Henüz firma yok. İşlemler ekranından firma ekleyin.</p>`;
+
+  $("paymentsTableBody").innerHTML = state.payments.length
+    ? state.payments
+        .map((p) => `<tr>
+          <td>${escapeHtml(isoToDisplay(p.payment_date))}</td>
+          <td>${escapeHtml(p.company_name)}</td>
+          <td>${escapeHtml(p.ship_name || "Firma geneli")}</td>
+          <td>${escapeHtml(p.note || "")}</td>
+          <td class="num"><span class="pill curr-${p.currency}">${fmtExactMoney(p.amount, p.currency)}</span></td>
+          <td>${state.documents.filter((d) => d.payment_id === p.id).map(docLinkHtml).join("")}
+            <button type="button" class="btn btn-sm" data-add-doc="dekont" data-doc-company="${p.company_id}" data-doc-payment="${p.id}">Dekont ekle</button></td>
+          <td><button type="button" class="btn btn-sm btn-quiet btn-danger" data-delete-payment="${p.id}">Sil</button></td>
+        </tr>`)
+        .join("")
+    : `<tr class="empty-row"><td colspan="7">Henüz ödeme yok.</td></tr>`;
+
   const docs = state.documents.filter((d) => !d.payment_id);
   const names = Object.fromEntries(state.companies.map((c) => [c.id, c.name]));
-  document.getElementById("documentsList").innerHTML = docs.length
-    ? `<table class="clean-table"><thead><tr><th>TÜR</th><th>FİRMA</th><th>BELGE</th><th>TARİH</th></tr></thead><tbody>` +
-      docs.map((d) => `<tr><td>${escapeHtml(d.kind)}</td><td>${escapeHtml(names[d.company_id] || "")}</td><td>${docLinkHtml(d)}</td><td>${escapeHtml(d.created_at.slice(0, 10))}</td></tr>`).join("") +
+  const kindName = { fatura: "Fatura", dekont: "Dekont", diger: "Belge" };
+  $("documentsList").innerHTML = docs.length
+    ? `<table class="data-table"><thead><tr><th>Tür</th><th>Firma</th><th>Dosya</th><th>Tarih</th></tr></thead><tbody>` +
+      docs.map((d) => `<tr><td>${kindName[d.kind] || "Belge"}</td><td>${escapeHtml(names[d.company_id] || "")}</td><td>${docLinkHtml(d)}</td><td>${escapeHtml(isoToDisplay(d.created_at))}</td></tr>`).join("") +
       `</tbody></table>`
-    : `<p class="muted-text">Henüz belge yok.</p>`;
+    : `<p class="hint" style="padding:0.8rem 1rem;margin:0">Henüz belge yok.</p>`;
 }
 
 async function uploadDocument(file, fields) {
@@ -445,569 +400,393 @@ async function uploadDocument(file, fields) {
   return data;
 }
 
-// --- View & Display Mode Switching ---
-function switchMainView(viewName) {
-  state.activeView = viewName;
-  document.getElementById("viewOperations").classList.toggle("active", viewName === "operations");
-  document.getElementById("viewLedger").classList.toggle("active", viewName === "ledger");
-
-  document.getElementById("tabOperations").classList.toggle("active", viewName === "operations");
-  document.getElementById("tabLedger").classList.toggle("active", viewName === "ledger");
-
-  document.getElementById("mNavOperations").classList.toggle("active", viewName === "operations");
-  document.getElementById("mNavLedger").classList.toggle("active", viewName === "ledger");
-}
-
-function setDisplayMode(mode) {
-  state.displayMode = mode;
-  document.body.setAttribute("data-display-mode", mode);
-  for (const btn of document.querySelectorAll(".mode-btn")) {
-    btn.classList.toggle("active", btn.getAttribute("data-mode") === mode);
+// --- Ekran geçişi ---
+function switchMainView(view) {
+  state.activeView = view;
+  $("viewOperations").classList.toggle("active", view === "operations");
+  $("viewLedger").classList.toggle("active", view === "ledger");
+  for (const [id, v] of [["tabOperations", "operations"], ["tabLedger", "ledger"], ["mNavOperations", "operations"], ["mNavLedger", "ledger"]]) {
+    $(id).classList.toggle("active", view === v);
   }
+  window.scrollTo({ top: 0 });
 }
 
-// --- Modal Record Form Helpers ---
+// --- Pencere yardımcıları ---
 function updateLiveModalTotal() {
-  const t = Number(document.getElementById("recTransfer").value || 0);
-  const h = Number(document.getElementById("recHotel").value || 0);
-  const m = Number(document.getElementById("recMeal").value || 0);
-  const g = Number(document.getElementById("recIgafi").value || 0);
-  const v = Number(document.getElementById("recVize").value || 0);
-  const e = Number(document.getElementById("recExtra").value || 0);
-  const curr = document.getElementById("recCurrency").value || "TRY";
-  document.getElementById("recLiveTotal").textContent = fmtExactMoney(t + h + m + g + v + e, curr);
+  const sum = ["recTransfer", "recHotel", "recMeal", "recIgafi", "recVize", "recExtra"].reduce(
+    (a, id) => a + Number($(id).value || 0),
+    0,
+  );
+  $("recLiveTotal").textContent = fmtExactMoney(sum, $("recCurrency").value || "TRY");
 }
 
 function openRecordModal(record = null) {
-  if (!state.activeShipId) {
-    alert("Lütfen önce bir gemi seçin veya ekleyin.");
-    return;
+  if (!state.activeShipId) return notify("Önce bir gemi seçin veya ekleyin.", true);
+  $("recId").value = record ? record.id : "";
+  $("modalRecordTitle").textContent = record ? "İşlemi düzenle" : "Yeni işlem";
+  $("recDatePicker").value = record ? toIsoInputDate(record.tx_date) : "";
+  $("recCurrency").value = record ? record.currency : "TRY";
+  $("recDeparture").value = record ? record.departure : "";
+  $("recArrival").value = record ? record.arrival : "";
+  $("recPassenger").value = record ? record.passenger_info : "";
+  for (const [id, key] of [["recTransfer", "transfer_fee"], ["recHotel", "hotel_fee"], ["recMeal", "meal_fee"], ["recIgafi", "igafi_fee"], ["recVize", "vize_fee"], ["recExtra", "extra_fee"]]) {
+    $(id).value = record && record[key] ? record[key] : "";
   }
-  const modal = document.getElementById("modalRecord");
-  document.getElementById("recId").value = record ? record.id : "";
-  document.getElementById("modalRecordTitle").textContent = record
-    ? `Kaydı Düzenle (#${record.id})`
-    : "Yeni Operasyon / İşlem Kaydı";
-
-  document.getElementById("recDatePicker").value = record ? toIsoInputDate(record.tx_date) : "";
-  document.getElementById("recCurrency").value = record ? record.currency : "TRY";
-  document.getElementById("recDeparture").value = record ? record.departure : "";
-  document.getElementById("recArrival").value = record ? record.arrival : "";
-  document.getElementById("recPassenger").value = record ? record.passenger_info : "";
-  document.getElementById("recTransfer").value = record && record.transfer_fee ? record.transfer_fee : "";
-  document.getElementById("recHotel").value = record && record.hotel_fee ? record.hotel_fee : "";
-  document.getElementById("recMeal").value = record && record.meal_fee ? record.meal_fee : "";
-  document.getElementById("recIgafi").value = record && record.igafi_fee ? record.igafi_fee : "";
-  document.getElementById("recVize").value = record && record.vize_fee ? record.vize_fee : "";
-  document.getElementById("recExtra").value = record && record.extra_fee ? record.extra_fee : "";
-  document.getElementById("recDescription").value = record ? record.description : "";
-
+  $("recDescription").value = record ? record.description : "";
   updateLiveModalTotal();
-  modal.showModal();
-}
-
-function openPaymentModal(preselectedCompanyId = null) {
-  if (state.companies.length === 0) {
-    alert("Önce bir firma eklemelisiniz.");
-    return;
-  }
-  const targetCompId = preselectedCompanyId || state.activeCompanyId || state.companies[0].id;
-  const payCompany = document.getElementById("payCompany");
-  payCompany.innerHTML = state.companies
-    .map((c) => `<option value="${c.id}" ${c.id === Number(targetCompId) ? "selected" : ""}>${escapeHtml(c.name)}</option>`)
-    .join("");
-
-  updatePaymentModalShips(Number(targetCompId));
-  document.getElementById("payDate").value = new Date().toISOString().slice(0, 10);
-  document.getElementById("payCurrency").value = "TRY";
-  document.getElementById("payAmount").value = "";
-  document.getElementById("payNote").value = "";
-
-  document.getElementById("modalPayment").showModal();
+  $("modalRecord").showModal();
 }
 
 function updatePaymentModalShips(companyId) {
-  const payShip = document.getElementById("payShip");
-  const compShips = state.ships.filter((s) => s.company_id === Number(companyId));
-  payShip.innerHTML =
-    `<option value="">-- Firma Geneli Ödeme --</option>` +
-    compShips.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join("");
+  $("payShip").innerHTML =
+    `<option value="">Firma geneli</option>` +
+    state.ships.filter((s) => s.company_id === Number(companyId)).map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join("");
 }
 
-// --- Event Listeners Setup ---
+function openPaymentModal(preselectedCompanyId = null) {
+  if (state.companies.length === 0) return notify("Önce bir firma eklemelisiniz.", true);
+  const target = Number(preselectedCompanyId || state.activeCompanyId || state.companies[0].id);
+  $("payCompany").innerHTML = state.companies
+    .map((c) => `<option value="${c.id}" ${c.id === target ? "selected" : ""}>${escapeHtml(c.name)}</option>`)
+    .join("");
+  updatePaymentModalShips(target);
+  $("formPayment").reset();
+  $("payDate").value = new Date().toISOString().slice(0, 10);
+  $("modalPayment").showModal();
+}
+
+// --- Olaylar ---
 document.addEventListener("DOMContentLoaded", () => {
-  setDisplayMode("auto");
-  refreshAll();
+  refreshAll().catch((err) => notify(err.message, true));
+  api("/api/version").then((v) => ($("appVersion").textContent = `v${v.version}`)).catch(() => {});
 
-  // Main View Tabs
-  document.getElementById("tabOperations").addEventListener("click", () => switchMainView("operations"));
-  document.getElementById("tabLedger").addEventListener("click", () => switchMainView("ledger"));
-  document.getElementById("mNavOperations").addEventListener("click", () => switchMainView("operations"));
-  document.getElementById("mNavLedger").addEventListener("click", () => switchMainView("ledger"));
-  document.getElementById("mNavQuickAdd").addEventListener("click", () => openRecordModal(null));
+  // Ekranlar
+  for (const id of ["tabOperations", "mNavOperations"]) $(id).addEventListener("click", () => switchMainView("operations"));
+  for (const id of ["tabLedger", "mNavLedger"]) $(id).addEventListener("click", () => switchMainView("ledger"));
 
-  // Display mode switcher
-  for (const btn of document.querySelectorAll(".mode-btn")) {
-    btn.addEventListener("click", () => setDisplayMode(btn.getAttribute("data-mode")));
-  }
-
-  // Date filters
-  document.getElementById("filterStartDate").addEventListener("change", (e) => {
-    state.startDate = e.target.value;
-    refreshAll();
+  // Açık menüleri dışarı tıklayınca kapat
+  document.addEventListener("click", (e) => {
+    for (const d of document.querySelectorAll("details.menu[open]")) if (!d.contains(e.target)) d.open = false;
   });
-  document.getElementById("filterEndDate").addEventListener("change", (e) => {
-    state.endDate = e.target.value;
-    refreshAll();
-  });
-  document.getElementById("btnClearFilter").addEventListener("click", () => {
-    state.startDate = "";
-    state.endDate = "";
-    document.getElementById("filterStartDate").value = "";
-    document.getElementById("filterEndDate").value = "";
+
+  // Tarih aralığı
+  $("filterStartDate").addEventListener("change", (e) => { state.startDate = e.target.value; refreshAll(); });
+  $("filterEndDate").addEventListener("change", (e) => { state.endDate = e.target.value; refreshAll(); });
+  $("btnClearFilter").addEventListener("click", () => {
+    state.startDate = state.endDate = "";
+    $("filterStartDate").value = $("filterEndDate").value = "";
     refreshAll();
   });
 
-  // Company Selector & CRUD
-  document.getElementById("selectCompany").addEventListener("change", (e) => {
+  // Firma
+  $("selectCompany").addEventListener("change", (e) => {
     state.activeCompanyId = Number(e.target.value);
     state.activeShipId = null;
     refreshAll();
   });
 
-  document.getElementById("btnAddCompany").addEventListener("click", async () => {
-    const name = prompt("Yeni Firma Adı:");
+  $("btnAddCompany").addEventListener("click", async () => {
+    const name = prompt("Yeni firma adı:");
     if (!name || !name.trim()) return;
-    const contact = prompt("Firma İletişim / Not (Opsiyonel):") || "";
+    const contact = prompt("İletişim / not (isteğe bağlı):") || "";
     try {
-      const created = await api("/api/companies", {
-        method: "POST",
-        body: JSON.stringify({ name, contact_info: contact }),
-      });
+      const created = await api("/api/companies", { method: "POST", body: JSON.stringify({ name, contact_info: contact }) });
       state.activeCompanyId = created.id;
       state.activeShipId = null;
       await refreshAll();
     } catch (err) {
-      alert(err.message);
+      notify(err.message, true);
     }
   });
 
-  document.getElementById("btnEditCompany").addEventListener("click", async () => {
+  $("btnEditCompany").addEventListener("click", async () => {
     const comp = state.companies.find((c) => c.id === state.activeCompanyId);
     if (!comp) return;
-    const action = prompt(
-      `"${comp.name}" firması için:\n- Yeni isim vermek için yeni adı yazın\n- Silmek için SİL yazın:`,
-      comp.name
-    );
+    const action = prompt(`"${comp.name}" için:\n- Yeni adı yazın ya da\n- Silmek için SİL yazın:`, comp.name);
     if (!action) return;
     try {
-      if (action.trim().toUpperCase() === "SİL" || action.trim().toUpperCase() === "SIL") {
-        if (!confirm(`"${comp.name}" firması ve altındaki tüm gemiler silinecek. Onaylıyor musunuz?`)) return;
+      if (["SİL", "SIL"].includes(action.trim().toLocaleUpperCase("tr-TR"))) {
+        if (!confirm(`"${comp.name}" ve altındaki tüm gemiler silinecek. Onaylıyor musunuz?`)) return;
         await api(`/api/companies/${comp.id}`, { method: "DELETE" });
-        state.activeCompanyId = null;
-        state.activeShipId = null;
+        state.activeCompanyId = state.activeShipId = null;
       } else {
-        await api(`/api/companies/${comp.id}`, {
-          method: "PUT",
-          body: JSON.stringify({ name: action, contact_info: comp.contact_info }),
-        });
+        await api(`/api/companies/${comp.id}`, { method: "PUT", body: JSON.stringify({ name: action, contact_info: comp.contact_info }) });
       }
       await refreshAll();
     } catch (err) {
-      alert(err.message);
+      notify(err.message, true);
     }
   });
 
-  // Ship Selection & CRUD
-  document.getElementById("shipTabsList").addEventListener("click", (e) => {
+  // Gemi
+  $("shipTabsList").addEventListener("click", (e) => {
     const tab = e.target.closest("[data-ship-id]");
     if (!tab) return;
-    state.activeShipId = Number(tab.getAttribute("data-ship-id"));
+    state.activeShipId = Number(tab.dataset.shipId);
     refreshAll();
   });
 
-  document.getElementById("btnAddShip").addEventListener("click", async () => {
-    if (!state.activeCompanyId) {
-      alert("Lütfen önce bir firma ekleyin.");
-      return;
-    }
-    const name = prompt("Yeni Gemi Adı (Örn: MV ATLAS):");
+  $("btnAddShip").addEventListener("click", async () => {
+    if (!state.activeCompanyId) return notify("Önce bir firma ekleyin.", true);
+    const name = prompt("Yeni gemi adı:");
     if (!name || !name.trim()) return;
     try {
-      const created = await api("/api/ships", {
-        method: "POST",
-        body: JSON.stringify({ company_id: state.activeCompanyId, name }),
-      });
+      const created = await api("/api/ships", { method: "POST", body: JSON.stringify({ company_id: state.activeCompanyId, name }) });
       state.activeShipId = created.id;
       await refreshAll();
     } catch (err) {
-      alert(err.message);
+      notify(err.message, true);
     }
   });
 
-  document.getElementById("btnEditShip").addEventListener("click", async () => {
+  $("btnEditShip").addEventListener("click", async () => {
     const ship = state.ships.find((s) => s.id === state.activeShipId);
     if (!ship) return;
-    const action = prompt(
-      `"${ship.name}" gemisi için:\n- Yeni isim vermek için yeni adı yazın\n- Silmek için SİL yazın:`,
-      ship.name
-    );
+    const action = prompt(`"${ship.name}" için:\n- Yeni adı yazın ya da\n- Silmek için SİL yazın:`, ship.name);
     if (!action) return;
     try {
-      if (action.trim().toUpperCase() === "SİL" || action.trim().toUpperCase() === "SIL") {
-        if (!confirm(`"${ship.name}" gemisi ve içindeki kayıtlar silinecek. Onaylıyor musunuz?`)) return;
+      if (["SİL", "SIL"].includes(action.trim().toLocaleUpperCase("tr-TR"))) {
+        if (!confirm(`"${ship.name}" ve içindeki kayıtlar silinecek. Onaylıyor musunuz?`)) return;
         await api(`/api/ships/${ship.id}`, { method: "DELETE" });
         state.activeShipId = null;
       } else {
-        await api(`/api/ships/${ship.id}`, {
-          method: "PUT",
-          body: JSON.stringify({ name: action }),
-        });
+        await api(`/api/ships/${ship.id}`, { method: "PUT", body: JSON.stringify({ name: action }) });
       }
       await refreshAll();
     } catch (err) {
-      alert(err.message);
+      notify(err.message, true);
     }
   });
 
-  // Desktop Quick Add Row
+  // Hızlı ekleme satırı
   const submitQuickAdd = async () => {
-    if (!state.activeShipId) {
-      alert("Lütfen önce bir gemi seçin.");
-      return;
-    }
-    const payload = {
-      ship_id: state.activeShipId,
-      tx_date: document.getElementById("qaDate").value,
-      departure: document.getElementById("qaDeparture").value,
-      arrival: document.getElementById("qaArrival").value,
-      currency: document.getElementById("qaCurrency").value,
-      passenger_info: document.getElementById("qaPassenger").value,
-      transfer_fee: Number(document.getElementById("qaTransfer").value || 0),
-      hotel_fee: Number(document.getElementById("qaHotel").value || 0),
-      meal_fee: Number(document.getElementById("qaMeal").value || 0),
-      igafi_fee: Number(document.getElementById("qaIgafi").value || 0),
-      vize_fee: Number(document.getElementById("qaVize").value || 0),
-      extra_fee: Number(document.getElementById("qaExtra").value || 0),
-      description: document.getElementById("qaDescription").value,
-    };
-
+    if (!state.activeShipId) return notify("Önce bir gemi seçin.", true);
+    const num = (id) => Number($(id).value || 0);
     try {
       await api("/api/records", {
         method: "POST",
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          ship_id: state.activeShipId,
+          tx_date: $("qaDate").value,
+          departure: $("qaDeparture").value,
+          arrival: $("qaArrival").value,
+          currency: $("qaCurrency").value,
+          passenger_info: $("qaPassenger").value,
+          transfer_fee: num("qaTransfer"),
+          hotel_fee: num("qaHotel"),
+          meal_fee: num("qaMeal"),
+          igafi_fee: num("qaIgafi"),
+          vize_fee: num("qaVize"),
+          extra_fee: num("qaExtra"),
+          description: $("qaDescription").value,
+        }),
       });
-      // Reset numeric and route inputs while keeping date/passenger handy
-      document.getElementById("qaTransfer").value = "";
-      document.getElementById("qaHotel").value = "";
-      document.getElementById("qaMeal").value = "";
-      document.getElementById("qaIgafi").value = "";
-      document.getElementById("qaVize").value = "";
-      document.getElementById("qaExtra").value = "";
-      document.getElementById("qaDescription").value = "";
+      for (const id of ["qaTransfer", "qaHotel", "qaMeal", "qaIgafi", "qaVize", "qaExtra", "qaDescription"]) $(id).value = "";
       await refreshAll();
     } catch (err) {
-      alert(err.message);
+      notify(err.message, true);
     }
   };
-
-  document.getElementById("btnQuickAddSubmit").addEventListener("click", submitQuickAdd);
-  document.getElementById("desktopQuickAddRow").addEventListener("keydown", (e) => {
+  $("btnQuickAddSubmit").addEventListener("click", submitQuickAdd);
+  $("desktopQuickAddRow").addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
       submitQuickAdd();
     }
   });
 
-  // Open Record Modal & Preset Chips
-  document.getElementById("btnOpenRecordModal").addEventListener("click", () => openRecordModal(null));
+  // İşlem penceresi
+  $("btnOpenRecordModal").addEventListener("click", () => openRecordModal(null));
 
-  document.getElementById("presetTypeChips").addEventListener("click", (e) => {
+  $("presetTypeChips").addEventListener("click", (e) => {
     const chip = e.target.closest("[data-preset]");
     if (!chip) return;
-    const preset = chip.getAttribute("data-preset");
-    document.getElementById("recDescription").value = preset;
-
-    if (preset === "AYAKBASTI" || preset === "GBT" || preset === "PERSONEL DEĞİŞİMİ") {
-      // Clear route for sub-row items and focus extra fee directly
-      document.getElementById("recTransfer").value = "";
-      document.getElementById("recHotel").value = "";
-      document.getElementById("recMeal").value = "";
-      document.getElementById("recExtra").focus();
+    const preset = chip.dataset.preset;
+    $("recDescription").value = preset;
+    if (["AYAKBASTI", "GBT", "PERSONEL DEĞİŞİMİ"].includes(preset)) {
+      for (const id of ["recTransfer", "recHotel", "recMeal"]) $(id).value = "";
+      $("recExtra").focus();
     } else if (preset === "TRANSFER") {
-      document.getElementById("recTransfer").focus();
+      $("recTransfer").focus();
     } else if (preset.includes("ROOM")) {
-      document.getElementById("recHotel").focus();
+      $("recHotel").focus();
     }
     updateLiveModalTotal();
   });
 
-  // Mini location/passenger chips inside modal
-  document.querySelectorAll(".mini-chips").forEach((group) => {
-    group.addEventListener("click", (e) => {
-      const btn = e.target.closest(".mini-chip");
-      if (!btn) return;
-      const targetId = group.getAttribute("data-target-input");
-      const input = document.getElementById(targetId);
-      if (input) input.value = btn.textContent.trim();
-    });
-  });
+  for (const id of ["recTransfer", "recHotel", "recMeal", "recIgafi", "recVize", "recExtra", "recCurrency"]) {
+    $(id).addEventListener("input", updateLiveModalTotal);
+  }
 
-  ["recTransfer", "recHotel", "recMeal", "recIgafi", "recVize", "recExtra", "recCurrency"].forEach((id) => {
-    document.getElementById(id).addEventListener("input", updateLiveModalTotal);
-  });
-
-  // Record Form Submit
-  document.getElementById("formRecord").addEventListener("submit", async (e) => {
+  $("formRecord").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const recId = document.getElementById("recId").value;
+    const recId = $("recId").value;
+    const num = (id) => Number($(id).value || 0);
     const payload = {
       ship_id: state.activeShipId,
-      tx_date: document.getElementById("recDatePicker").value,
-      currency: document.getElementById("recCurrency").value,
-      departure: document.getElementById("recDeparture").value,
-      arrival: document.getElementById("recArrival").value,
-      passenger_info: document.getElementById("recPassenger").value,
-      transfer_fee: Number(document.getElementById("recTransfer").value || 0),
-      hotel_fee: Number(document.getElementById("recHotel").value || 0),
-      meal_fee: Number(document.getElementById("recMeal").value || 0),
-      igafi_fee: Number(document.getElementById("recIgafi").value || 0),
-      vize_fee: Number(document.getElementById("recVize").value || 0),
-      extra_fee: Number(document.getElementById("recExtra").value || 0),
-      description: document.getElementById("recDescription").value,
+      tx_date: $("recDatePicker").value,
+      currency: $("recCurrency").value,
+      departure: $("recDeparture").value,
+      arrival: $("recArrival").value,
+      passenger_info: $("recPassenger").value,
+      transfer_fee: num("recTransfer"),
+      hotel_fee: num("recHotel"),
+      meal_fee: num("recMeal"),
+      igafi_fee: num("recIgafi"),
+      vize_fee: num("recVize"),
+      extra_fee: num("recExtra"),
+      description: $("recDescription").value,
     };
-
     try {
-      if (recId) {
-        await api(`/api/records/${recId}`, {
-          method: "PUT",
-          body: JSON.stringify(payload),
-        });
-      } else {
-        await api("/api/records", {
-          method: "POST",
-          body: JSON.stringify(payload),
-        });
-      }
-      document.getElementById("modalRecord").close();
+      await api(recId ? `/api/records/${recId}` : "/api/records", { method: recId ? "PUT" : "POST", body: JSON.stringify(payload) });
+      $("modalRecord").close();
       await refreshAll();
     } catch (err) {
-      alert(err.message);
+      notify(err.message, true);
     }
   });
 
-  // Edit / Delete Record Delegation
+  // Tıklama yönlendirme (düzenle/sil/belge/PDF/ödeme)
   document.addEventListener("click", async (e) => {
-    const editBtn = e.target.closest("[data-edit-record]");
-    if (editBtn) {
-      const id = Number(editBtn.getAttribute("data-edit-record"));
-      const rec = state.records.find((r) => r.id === id);
-      if (rec) openRecordModal(rec);
-      return;
-    }
-
-    const delBtn = e.target.closest("[data-delete-record]");
-    if (delBtn) {
-      const id = Number(delBtn.getAttribute("data-delete-record"));
-      if (!confirm("Bu işlem satırını silmek istediğinize emin misiniz?")) return;
-      try {
-        await api(`/api/records/${id}`, { method: "DELETE" });
+    const t = (sel) => e.target.closest(sel);
+    try {
+      let el;
+      if ((el = t("[data-edit-record]"))) {
+        const rec = state.records.find((r) => r.id === Number(el.dataset.editRecord));
+        if (rec) openRecordModal(rec);
+      } else if ((el = t("[data-delete-record]"))) {
+        if (!confirm("Bu işlem satırını silmek istediğinize emin misiniz?")) return;
+        await api(`/api/records/${el.dataset.deleteRecord}`, { method: "DELETE" });
         await refreshAll();
-      } catch (err) {
-        alert(err.message);
-      }
-      return;
-    }
-
-    const quickPayBtn = e.target.closest("[data-quick-pay-company]");
-    if (quickPayBtn) {
-      openPaymentModal(Number(quickPayBtn.getAttribute("data-quick-pay-company")));
-      return;
-    }
-
-    const jumpShipBtn = e.target.closest("[data-jump-ship]");
-    if (jumpShipBtn) {
-      state.activeCompanyId = Number(jumpShipBtn.getAttribute("data-jump-company"));
-      state.activeShipId = Number(jumpShipBtn.getAttribute("data-jump-ship"));
-      switchMainView("operations");
-      await refreshAll();
-      return;
-    }
-
-    const delPayBtn = e.target.closest("[data-delete-payment]");
-    if (delPayBtn) {
-      const id = Number(delPayBtn.getAttribute("data-delete-payment"));
-      if (!confirm("Bu ödeme kaydını silmek istediğinize emin misiniz?")) return;
-      try {
-        await api(`/api/payments/${id}`, { method: "DELETE" });
+      } else if ((el = t("[data-pdf]"))) {
+        el.closest("details")?.removeAttribute("open");
+        pdfFor(el.dataset.pdf);
+      } else if ((el = t("[data-pdf-company]"))) {
+        pdfFor(el.dataset.pdfCompany, Number(el.dataset.companyId));
+      } else if ((el = t("[data-quick-pay-company]"))) {
+        openPaymentModal(Number(el.dataset.quickPayCompany));
+      } else if ((el = t("[data-jump-ship]"))) {
+        state.activeCompanyId = Number(el.dataset.jumpCompany);
+        state.activeShipId = Number(el.dataset.jumpShip);
+        switchMainView("operations");
         await refreshAll();
-      } catch (err) {
-        alert(err.message);
-      }
-      return;
-    }
-
-    const addDocBtn = e.target.closest("[data-add-doc]");
-    if (addDocBtn) {
-      const company_id = Number(addDocBtn.dataset.docCompany) ||
-        Number(document.getElementById("ledgerFilterCompany").value) || state.activeCompanyId;
-      if (!company_id) return alert("Önce bir firma seçin.");
-      state.pendingDoc = { company_id, payment_id: addDocBtn.dataset.docPayment, kind: addDocBtn.dataset.addDoc };
-      document.getElementById("docFileInput").click();
-      return;
-    }
-
-    const delDocBtn = e.target.closest("[data-delete-doc]");
-    if (delDocBtn) {
-      if (!confirm("Bu belgeyi silmek istediğinize emin misiniz?")) return;
-      try {
-        await api(`/api/documents/${delDocBtn.dataset.deleteDoc}`, { method: "DELETE" });
+      } else if ((el = t("[data-delete-payment]"))) {
+        if (!confirm("Bu ödeme kaydını silmek istediğinize emin misiniz?")) return;
+        await api(`/api/payments/${el.dataset.deletePayment}`, { method: "DELETE" });
         await refreshAll();
-      } catch (err) {
-        alert(err.message);
+      } else if ((el = t("[data-add-doc]"))) {
+        const company_id = Number(el.dataset.docCompany) || Number($("ledgerFilterCompany").value) || state.activeCompanyId;
+        if (!company_id) return notify("Önce bir firma seçin.", true);
+        state.pendingDoc = { company_id, payment_id: el.dataset.docPayment, kind: el.dataset.addDoc };
+        $("docFileInput").click();
+      } else if ((el = t("[data-delete-doc]"))) {
+        if (!confirm("Bu belgeyi silmek istediğinize emin misiniz?")) return;
+        await api(`/api/documents/${el.dataset.deleteDoc}`, { method: "DELETE" });
+        await refreshAll();
+      } else if ((el = t("[data-close-modal]"))) {
+        $(el.dataset.closeModal)?.close();
       }
-      return;
-    }
-
-    const closeModalBtn = e.target.closest("[data-close-modal]");
-    if (closeModalBtn) {
-      const modalId = closeModalBtn.getAttribute("data-close-modal");
-      document.getElementById(modalId)?.close();
+    } catch (err) {
+      notify(err.message, true);
     }
   });
 
-  document.getElementById("docFileInput").addEventListener("change", async (e) => {
+  // Firma kartlarının açık/kapalı durumunu hatırla (toggle olayı kabarcıklanmaz)
+  $("ledgerCompaniesContainer").addEventListener(
+    "toggle",
+    (e) => {
+      const id = Number(e.target.dataset.company);
+      if (!id) return;
+      if (e.target.open) state.openCompanies.add(id);
+      else state.openCompanies.delete(id);
+    },
+    true,
+  );
+
+  $("docFileInput").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     e.target.value = "";
     if (!file || !state.pendingDoc) return;
     try {
       await uploadDocument(file, state.pendingDoc);
+      notify("Belge yüklendi.");
       await refreshAll();
     } catch (err) {
-      alert(err.message);
+      notify(err.message, true);
     }
   });
 
-  // PDF çıktıları
-  const pdf = (path) => {
-    const params = new URLSearchParams();
-    if (state.startDate) params.set("start_date", state.startDate);
-    if (state.endDate) params.set("end_date", state.endDate);
-    window.location.href = `/api/pdf/${path}?${params.toString()}`;
-  };
-  document.getElementById("btnPdfShip").addEventListener("click", () => {
-    if (!state.activeShipId) return alert("Önce bir gemi seçin.");
-    pdf(`ship/${state.activeShipId}`);
-  });
-  document.getElementById("btnPdfCompanyDetail").addEventListener("click", () => {
-    if (!state.activeCompanyId) return alert("Önce bir firma seçin.");
-    pdf(`company/${state.activeCompanyId}/detail`);
-  });
-  document.getElementById("btnPdfCompanyFinancial").addEventListener("click", () => {
-    if (!state.activeCompanyId) return alert("Önce bir firma seçin.");
-    pdf(`company/${state.activeCompanyId}/financial`);
-  });
+  // Ödeme
+  $("btnOpenPaymentModal").addEventListener("click", () => openPaymentModal(null));
+  $("payCompany").addEventListener("change", (e) => updatePaymentModalShips(Number(e.target.value)));
+  $("ledgerFilterCompany").addEventListener("change", () => refreshAll());
 
-  // Payment Modal
-  document.getElementById("btnOpenPaymentModal").addEventListener("click", () => openPaymentModal(null));
-  document.getElementById("payCompany").addEventListener("change", (e) => {
-    updatePaymentModalShips(Number(e.target.value));
-  });
-
-  document.getElementById("formPayment").addEventListener("submit", async (e) => {
+  $("formPayment").addEventListener("submit", async (e) => {
     e.preventDefault();
     const payload = {
-      company_id: Number(document.getElementById("payCompany").value),
-      ship_id: document.getElementById("payShip").value ? Number(document.getElementById("payShip").value) : null,
-      payment_date: document.getElementById("payDate").value,
-      currency: document.getElementById("payCurrency").value,
-      amount: Number(document.getElementById("payAmount").value || 0),
-      note: document.getElementById("payNote").value,
+      company_id: Number($("payCompany").value),
+      ship_id: $("payShip").value ? Number($("payShip").value) : null,
+      payment_date: $("payDate").value,
+      currency: $("payCurrency").value,
+      amount: Number($("payAmount").value || 0),
+      note: $("payNote").value,
     };
-
     try {
-      const created = await api("/api/payments", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      const docFile = document.getElementById("payDoc").files[0];
+      const created = await api("/api/payments", { method: "POST", body: JSON.stringify(payload) });
+      const docFile = $("payDoc").files[0];
       if (docFile) {
         try {
           await uploadDocument(docFile, { company_id: payload.company_id, payment_id: created.id, kind: "dekont" });
         } catch (err) {
-          alert(`Ödeme kaydedildi ama dekont yüklenemedi: ${err.message}`);
+          notify(`Ödeme kaydedildi ama dekont yüklenemedi: ${err.message}`, true);
         }
       }
-      document.getElementById("formPayment").reset();
-      document.getElementById("modalPayment").close();
+      $("modalPayment").close();
       await refreshAll();
     } catch (err) {
-      alert(err.message);
+      notify(err.message, true);
     }
   });
 
-  document.getElementById("ledgerFilterCompany").addEventListener("change", () => refreshAll());
-
-  // Excel Modal & Export/Import
-  document.getElementById("btnExcelModal").addEventListener("click", () => {
-    document.getElementById("modalExcel").showModal();
+  // Excel'den aktar
+  $("btnExcelModal").addEventListener("click", () => {
+    $("appVersion").closest("header").querySelector("details.menu")?.removeAttribute("open");
+    $("modalExcel").showModal();
   });
 
-  document.getElementById("btnExportActiveShip").addEventListener("click", () => {
-    if (!state.activeShipId) return alert("Önce bir gemi seçin.");
-    const params = new URLSearchParams({ ship_id: String(state.activeShipId) });
-    if (state.startDate) params.set("start_date", state.startDate);
-    if (state.endDate) params.set("end_date", state.endDate);
-    window.location.href = `/api/excel/export?${params.toString()}`;
-  });
-
-  document.getElementById("btnExportActiveCompany").addEventListener("click", () => {
-    if (!state.activeCompanyId) return alert("Önce bir firma seçin.");
-    const params = new URLSearchParams({ company_id: String(state.activeCompanyId) });
-    if (state.startDate) params.set("start_date", state.startDate);
-    if (state.endDate) params.set("end_date", state.endDate);
-    window.location.href = `/api/excel/export?${params.toString()}`;
-  });
-
-  document.getElementById("formExcelImport").addEventListener("submit", async (e) => {
+  $("formExcelImport").addEventListener("submit", async (e) => {
     e.preventDefault();
-    if (!state.activeCompanyId) return alert("Lütfen önce bir firma seçin.");
-    const fileInput = document.getElementById("excelFileInput");
-    if (!fileInput.files || fileInput.files.length === 0) return;
-
-    const formData = new FormData();
-    formData.append("company_id", String(state.activeCompanyId));
-    if (state.activeShipId) formData.append("ship_id", String(state.activeShipId));
-    formData.append("file", fileInput.files[0]);
-
+    if (!state.activeCompanyId) return notify("Önce bir firma seçin.", true);
+    const file = $("excelFileInput").files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("company_id", String(state.activeCompanyId));
+    if (state.activeShipId) fd.append("ship_id", String(state.activeShipId));
+    fd.append("file", file);
     try {
-      const res = await fetch("/api/excel/import", {
-        method: "POST",
-        body: formData,
-      });
+      const res = await fetch("/api/excel/import", { method: "POST", body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Excel yüklenemedi.");
-      alert(`${data.importedCount} satır başarıyla aktarıldı (${data.shipsTouched.join(", ")}).`);
-      fileInput.value = "";
-      document.getElementById("modalExcel").close();
+      notify(`${data.importedCount} satır aktarıldı (${data.shipsTouched.join(", ")}).`);
+      $("excelFileInput").value = "";
+      $("modalExcel").close();
       await refreshAll();
     } catch (err) {
-      alert(err.message);
+      notify(err.message, true);
     }
   });
 
-  // Network / Tailscale Info Modal
-  document.getElementById("btnNetworkModal").addEventListener("click", async () => {
-    document.getElementById("modalNetwork").showModal();
+  // Telefondan bağlan
+  $("btnNetworkModal").addEventListener("click", async () => {
+    $("appVersion").closest("header").querySelector("details.menu")?.removeAttribute("open");
+    $("modalNetwork").showModal();
     try {
       const info = await api("/api/network-info");
-      document.getElementById("netTailscaleUrl").textContent =
-        info.tailscaleUrl || "Tailscale açık değil veya IP bulunamadı";
-      document.getElementById("netLanUrl").textContent =
-        info.lanUrls && info.lanUrls.length > 0 ? info.lanUrls.join(" , ") : "Bulunamadı";
-      document.getElementById("netLocalUrl").textContent = info.localUrl;
+      $("netTailscaleUrl").textContent = info.tailscaleUrl || "Tailscale açık değil veya IP bulunamadı";
+      $("netLanUrl").textContent = info.lanUrls?.length ? info.lanUrls.join(" , ") : "Bulunamadı";
+      $("netLocalUrl").textContent = info.localUrl;
     } catch {
-      document.getElementById("netTailscaleUrl").textContent = "Bağlantı bilgisi alınamadı";
+      $("netTailscaleUrl").textContent = "Bağlantı bilgisi alınamadı";
     }
   });
 });

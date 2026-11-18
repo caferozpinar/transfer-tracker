@@ -33,6 +33,10 @@ jobs:
       - name: Run Automated Unit Tests
         run: deno task test
 
+      - name: Stamp version from tag (v* only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "export const VERSION = \"${GITHUB_REF_NAME#v}\";" > src/version.ts
+
       - name: Compile Single-File Windows Executable (GemiTransferTakip.exe)
         run: deno task build:win
 
@@ -43,9 +47,49 @@ jobs:
           path: dist/GemiTransferTakip.exe
           if-no-files-found: error
 
+      - name: Generate version.json for auto-update (v* only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          SHA=$(sha256sum dist/GemiTransferTakip.exe | cut -d' ' -f1)
+          printf '{"version":"%s","url":"https://github.com/%s/releases/download/%s/GemiTransferTakip.exe","sha256":"%s"}\n' \
+            "${GITHUB_REF_NAME#v}" "${{ github.repository }}" "${GITHUB_REF_NAME}" "$SHA" > dist/version.json
+          cat dist/version.json
+
       - name: Publish to GitHub Releases (on version tag v*)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/GemiTransferTakip.exe
+          files: |
+            dist/GemiTransferTakip.exe
+            dist/version.json
           generate_release_notes: true
+
+  smoke-windows:
+    name: Smoke test Windows EXE (PDF uretimi)
+    needs: test-and-build
+    runs-on: windows-latest
+    steps:
+      - name: Download Windows EXE
+        uses: actions/download-artifact@v4
+        with:
+          name: GemiTransferTakip-Windows-x64
+          path: dist
+
+      - name: Start EXE and request a PDF
+        shell: pwsh
+        run: |
+          $env:PORT = "8089"; $env:NO_UPDATE = "1"; $env:NO_BROWSER = "1"; $env:DB_PATH = "$PWD\smoke.db"
+          $p = Start-Process -FilePath ".\dist\GemiTransferTakip.exe" -PassThru -WindowStyle Hidden -RedirectStandardOutput out.log -RedirectStandardError err.log
+          Start-Sleep -Seconds 6
+          try {
+            $c = Invoke-RestMethod -Method Post -Uri http://localhost:8089/api/companies -ContentType 'application/json' -Body '{"name":"SMOKE"}'
+            Invoke-WebRequest -Uri "http://localhost:8089/api/pdf/company/$($c.id)/financial" -OutFile smoke.pdf
+            $head = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("$PWD\smoke.pdf"), 0, 5)
+            if ($head -ne "%PDF-") { throw "Gecersiz PDF basligi: $head" }
+            Write-Host "PDF OK ($((Get-Item smoke.pdf).Length) bayt)"
+          } catch {
+            Get-Content out.log, err.log -ErrorAction SilentlyContinue
+            throw
+          } finally {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          }

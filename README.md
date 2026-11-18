@@ -1,29 +1,18 @@
-# ⚓ Gemi Transfer ve Cari Takip Sistemi
+# ⚓ Gemi Transfer Takip
 
-Gemi acenteleri ve operasyon firmaları için **Firma -> Gemi -> Operasyon Tablosu** hiyerarşisinde çalışan, çoklu para birimi (`₺ TRY`, `$ USD`, `€ EUR`) destekli, cari hesap (girdi-çıktı / tahsilat ve kalan alacak) takibi yapan, Excel (`.xlsx`) içe/dışa aktarım özellikli yerel web uygulaması.
-
-Uygulama **Windows** üzerinde hiçbir ek kuruluma ihtiyaç duymayan **tek bir `.exe` dosyası (`GemiTransferTakip.exe`)** olarak çalışır ve **Tailscale** üzerinden cep telefonundan (mobil uyumlu arayüzle) her yerden erişilebilir.
+Gemi acenteleri ve operasyon firmaları için **Firma → Gemi → İşlem Tablosu** düzeninde çalışan, çoklu para birimi (`₺`, `$`, `€`) destekli, mali durum (yapılan iş, alınan ödeme, kalan) takibi yapan yerel web uygulaması. Windows'ta tek bir `.exe` olarak çalışır, **Tailscale** ile telefondan erişilir ve yeni sürümleri açılışta kendi kendine yükler.
 
 ---
 
-## ✨ Temel Özellikler
+## ✨ Özellikler
 
-1. **Firma ve Gemi Bazlı Tablolar:**
-   - Her firmanın altında gemiler (`MV ATLAS` vb.) sekme olarak yer alır.
-   - Her geminin altında standart Excel görünümünde (`TARİH | KALKIŞ | VARIŞ | GEMİ ADI | KİŞİ SAYISI | TRANSFER ÜCRETİ | OTEL | YEMEK | TOTAL | ODA DETAYI`) operasyon tablosu bulunur.
-   - Boş bırakılan ücret kalemleri tabloda otomatik olarak **`X`** şeklinde gösterilir.
-   - `AYAKBASTI`, `GBT`, `PERSONEL DEĞİŞİMİ` gibi alt kalem olmayan işlemler için **Doğrudan / Ek Tutar** alanı ile doğrudan `TOTAL` sütununa ücret yazılabilir.
-2. **Üç Kademeli Otomatik Toplam:**
-   - **Seçili Gemi Toplamı**, **Seçili Firma Toplamı** ve **Genel Toplam (Tüm Firmalar)** anlık olarak hesaplanır.
-3. **Bağımsız Çoklu Para Birimi (`₺`, `$`, `€`):**
-   - Para birimleri birbirine kur ile dönüştürülmez; Dolar (`$`) girilen işin alacağı ve ödemesi Dolar bakiyesinden, Euro (`€`) girilen Euro'dan, TL (`₺`) girilen TL'den takip edilir.
-4. **Girdi-Çıktı (Cari Hesap & Ödeme Takip) Ekranı:**
-   - Firma bazında **Toplam Yapılan İş (Alacak)**, **Alınan Ödemeler (Tahsilat)** ve **Kalan Alacak (Bakiye)** canlı olarak görünür.
-5. **Masaüstü + Telefon (Mobil) Uyumlu Pratik Tasarım:**
-   - Bilgisayarda klavye ile hızlı satır ekleme (`Enter` ile seri kayıt) ve Excel görünümü.
-   - Telefonda tek elle kullanıma uygun **Alt Menü**, okunaklı **Operasyon Kartları** (veya tek dokunuşla Excel Tablo görünümü) ve hızlı işlem çipleri (`[TRANSFER]`, `[AYAKBASTI]`, `[GBT]`, `[PERSONEL DEĞİŞİMİ]`, `[1 TWIN ROOM]`).
-6. **Sıfır Bağımlılıklı Excel (`.xlsx`) İndirme ve Yükleme:**
-   - Seçili gemiyi veya firmanın tüm gemilerini (her gemi ayrı bir Excel sayfası/sheet olacak şekilde) renkli ve biçimli `.xlsx` olarak indirir, mevcut `.xlsx` dosyalarını içeri aktarır.
+1. **Firma ve gemi bazlı tablolar:** `Tarih | Kalkış | Varış | Kişi | Transfer | Otel | Yemek | İGAFİ | Vize | Ek | Toplam | Notlar`. Boş tutarlar soluk `–` olarak görünür. `Ek`, Ayakbastı/GBT gibi doğrudan toplama yazılan tutarlar içindir. Notlar serbest metindir.
+2. **Mali durum:** Firma bazında **Yapılan iş**, **Alınan ödeme**, **Kalan**. Para birimleri birbirine çevrilmez, ayrı ayrı izlenir.
+3. **PDF çıktıları:** Tek geminin detayı, firmanın tüm detayları, firmanın mali durumu. Tarih aralığı filtresi PDF'e de uygulanır.
+4. **Belgeler:** Ödemelere dekont, firmalara fatura/belge (PDF, JPG, PNG; en fazla 15 MB) eklenir. Belgeler `veriler.db` içinde saklanır.
+5. **Excel'den aktarma:** Mevcut `.xlsx` dosyaları içeri aktarılabilir. Excel çıktısı yoktur.
+6. **Masaüstü + telefon:** Geniş ekranda tablo, dar ekranda kartlar ve alt menü.
+7. **Otomatik güncelleme:** Açılışta GitHub release'indeki `version.json` kontrol edilir; yeni sürüm varsa indirilir, doğrulanır ve uygulama yeniden başlar (yalnızca Windows `.exe`; `NO_UPDATE=1` ile kapatılır).
 
 ---
 
@@ -57,7 +46,7 @@ Uygulama bilgisayarda açık olduğu sürece, telefonunuzla ister evde Wi-Fi'da 
 3. Hem bilgisayarda hem de telefonda **aynı Google veya Microsoft hesabınızla** giriş yapın ve bağlantıyı **Connected (Açık)** konumuna getirin.
 
 ### Adım 2: Telefondan Uygulamaya Girin
-1. Bilgisayarda `GemiTransferTakip.exe` açıkken siyah konsol ekranında (veya web arayüzünün sağ üstündeki **"📱 Telefondan Bağlan"** butonunda) yazan Tailscale adresine bakın:
+1. Bilgisayarda `GemiTransferTakip.exe` açıkken siyah konsol ekranında (veya web arayüzünün sağ üstündeki **Menü → Telefondan Bağlan** bölümünde) yazan Tailscale adresine bakın:
    - Örnek: `http://100.85.42.19:8080`
 2. Telefonunuzda **Safari** veya **Chrome** tarayıcısını açıp bu adresi yazın.
 3. **Pratik İpucu (Uygulama Gibi Kullanma):**
@@ -67,7 +56,7 @@ Uygulama bilgisayarda açık olduğu sürece, telefonunuzla ister evde Wi-Fi'da 
 
 ## 🛠️ 3. Geliştirici Rehberi (Linux / Windows Kaynak Koddan Çalıştırma ve Derleme)
 
-Proje **Deno 2** ve yerleşik `node:sqlite` ile sıfır harici paket bağımlılığıyla geliştirilmiştir.
+Proje **Deno 2** ve yerleşik `node:sqlite` ile geliştirilmiştir. Tek harici bağımlılık PDF üretimi için `pdf-lib`'dir.
 
 ### Gereksinimler
 - [Deno 2.x](https://deno.com/) (`curl -fsSL https://deno.land/install.sh | sh`)
@@ -93,6 +82,8 @@ deno task build:linux
 ### Ortam Değişkenleri (Opsiyonel)
 - `PORT`: Varsayılan `8080` portunu değiştirmek için kullanılır (Örn: `PORT=9090`).
 - `DB_PATH`: Varsayılan `veriler.db` dosya yolunu değiştirmek için kullanılır.
+- `NO_UPDATE`: Otomatik güncelleme kontrolünü kapatır.
+- `NO_BROWSER`: Açılışta tarayıcıyı otomatik açmaz.
 
 ## Üçüncü Taraf Lisanslar
 

@@ -1,6 +1,8 @@
 import { AppDatabase, Currency } from "./db.ts";
+import { VERSION } from "./version.ts";
+import { autoUpdate } from "./updater.ts";
 import { companyDetailPdf, companyFinancialPdf, shipDetailPdf } from "./pdf.ts";
-import { exportCompanyToXlsx, exportShipRecordsToXlsx, importRecordsFromXlsx } from "./excel.ts";
+import { importRecordsFromXlsx } from "./excel.ts";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -63,6 +65,10 @@ export function createAppHandler(db: AppDatabase, port = 8080) {
       // --- API Routes ---
       if (path === "/api/network-info" && method === "GET") {
         return jsonResponse(detectNetworkAddresses(port));
+      }
+
+      if (path === "/api/version" && method === "GET") {
+        return jsonResponse({ version: VERSION });
       }
 
       if (path === "/api/autocomplete" && method === "GET") {
@@ -203,50 +209,7 @@ export function createAppHandler(db: AppDatabase, port = 8080) {
         return jsonResponse({ ok: true });
       }
 
-      // Excel Export & Import
-      if (path === "/api/excel/export" && method === "GET") {
-        const shipId = url.searchParams.get("ship_id");
-        const companyId = url.searchParams.get("company_id");
-        const start_date = url.searchParams.get("start_date") || undefined;
-        const end_date = url.searchParams.get("end_date") || undefined;
-
-        if (shipId) {
-          const ship = db.getShip(Number(shipId));
-          if (!ship) return jsonResponse({ error: "Gemi bulunamadı." }, 404);
-          const records = db.listRecords({
-            ship_id: ship.id,
-            start_date,
-            end_date,
-          });
-          const buf = exportShipRecordsToXlsx(ship.name, records);
-          const fileName = encodeURIComponent(`${ship.name}_Tablo.xlsx`);
-          return new Response(buf as unknown as BodyInit, {
-            status: 200,
-            headers: {
-              "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-              "content-disposition": `attachment; filename="${fileName}"`,
-            },
-          });
-        }
-
-        if (companyId) {
-          const companies = db.listCompanies();
-          const comp = companies.find((c) => c.id === Number(companyId));
-          if (!comp) return jsonResponse({ error: "Firma bulunamadı." }, 404);
-          const buf = exportCompanyToXlsx(db, comp.id, { start_date, end_date });
-          const fileName = encodeURIComponent(`${comp.name}_Tum_Gemiler.xlsx`);
-          return new Response(buf as unknown as BodyInit, {
-            status: 200,
-            headers: {
-              "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-              "content-disposition": `attachment; filename="${fileName}"`,
-            },
-          });
-        }
-
-        return jsonResponse({ error: "ship_id veya company_id gereklidir." }, 400);
-      }
-
+      // Excel import
       if (path === "/api/excel/import" && method === "POST") {
         const formData = await req.formData();
         const companyId = Number(formData.get("company_id"));
@@ -367,11 +330,12 @@ export function createAppHandler(db: AppDatabase, port = 8080) {
 if (import.meta.main) {
   const port = Number(Deno.env.get("PORT") || 8080);
   const dbPath = Deno.env.get("DB_PATH") || "veriler.db";
+  await autoUpdate(dbPath); // yeni sürüm varsa kurar ve yeniden başlatır
   const db = new AppDatabase(dbPath);
 
   const net = detectNetworkAddresses(port);
   console.log("==========================================================");
-  console.log("  GEMİ TRANSFER VE CARİ TAKİP SİSTEMİ BAŞLATILDI");
+  console.log(`  GEMİ TRANSFER VE CARİ TAKİP SİSTEMİ BAŞLATILDI (v${VERSION})`);
   console.log("==========================================================");
   console.log(`  Bilgisayar (Yerel) Adresi : ${net.localUrl}`);
   if (net.tailscaleUrl) {

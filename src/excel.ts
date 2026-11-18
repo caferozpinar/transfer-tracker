@@ -1,41 +1,5 @@
 import { inflateRawSync } from "node:zlib";
-import { AppDatabase, Currency, RecordInput, RecordItem, roundMoney, toDisplayDate } from "./db.ts";
-
-const CURRENCY_SYMBOLS: Record<Currency, string> = {
-  TRY: "₺",
-  USD: "$",
-  EUR: "€",
-};
-
-export function formatMoneyCell(amount: number, currency: Currency): string {
-  if (!amount || amount === 0) return "X";
-  const sym = CURRENCY_SYMBOLS[currency] || "₺";
-  const formatted = new Intl.NumberFormat("tr-TR", {
-    minimumFractionDigits: amount % 1 === 0 ? 0 : 2,
-    maximumFractionDigits: 2,
-  }).format(amount);
-  return `${formatted} ${sym}`;
-}
-
-export function formatTotalSummaryCell(records: RecordItem[]): string {
-  const totals: Record<Currency, number> = { TRY: 0, USD: 0, EUR: 0 };
-  for (const r of records) {
-    const c = r.currency || "TRY";
-    totals[c] = roundMoney(totals[c] + r.total_fee);
-  }
-  const parts: string[] = [];
-  for (const c of ["TRY", "USD", "EUR"] as Currency[]) {
-    if (totals[c] > 0) {
-      const sym = CURRENCY_SYMBOLS[c];
-      const formatted = new Intl.NumberFormat("tr-TR", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      }).format(totals[c]);
-      parts.push(`${sym}${formatted}`);
-    }
-  }
-  return parts.length > 0 ? parts.join(" | ") : "₺0,00";
-}
+import { AppDatabase, Currency, RecordInput, roundMoney, toDisplayDate } from "./db.ts";
 
 export function parseMoneyAndCurrency(
   raw: unknown,
@@ -113,7 +77,7 @@ function crc32(data: Uint8Array): number {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-function createZipArchive(files: { name: string; data: Uint8Array }[]): Uint8Array {
+export function createZipArchive(files: { name: string; data: Uint8Array }[]): Uint8Array {
   const enc = new TextEncoder();
   const localParts: Uint8Array[] = [];
   const centralParts: Uint8Array[] = [];
@@ -242,15 +206,6 @@ function readZipArchive(buffer: Uint8Array): Map<string, string> {
   return entries;
 }
 
-function xmlEscape(s: string): string {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
 function xmlUnescape(s: string): string {
   return String(s ?? "")
     .replace(/&apos;/g, "'")
@@ -260,264 +215,12 @@ function xmlUnescape(s: string): string {
     .replace(/&amp;/g, "&");
 }
 
-function colIndexToLetter(colIdx: number): string {
-  let n = colIdx + 1;
-  let str = "";
-  while (n > 0) {
-    const rem = (n - 1) % 26;
-    str = String.fromCharCode(65 + rem) + str;
-    n = Math.floor((n - 1) / 26);
-  }
-  return str;
-}
-
 function colLettersToIndex(letters: string): number {
   let idx = 0;
   for (let i = 0; i < letters.length; i++) {
     idx = idx * 26 + (letters.charCodeAt(i) - 64);
   }
   return idx - 1;
-}
-
-interface SheetSpec {
-  name: string;
-  records: RecordItem[];
-}
-
-function buildStyledWorkbookXlsx(sheets: SheetSpec[]): Uint8Array {
-  const enc = new TextEncoder();
-  const safeSheets = sheets.map((s, idx) => ({
-    name: (s.name || `GEMI_${idx + 1}`).replace(/[\\/?*[\]:]/g, "").slice(0, 31) || `GEMI_${idx + 1}`,
-    records: s.records,
-  }));
-
-  // 1. [Content_Types].xml
-  const sheetOverrides = safeSheets
-    .map(
-      (_, i) =>
-        `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`
-    )
-    .join("");
-
-  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
-  ${sheetOverrides}
-</Types>`;
-
-  // 2. _rels/.rels
-  const rootRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>`;
-
-  // 3. xl/workbook.xml
-  const wbSheetsXml = safeSheets
-    .map(
-      (s, i) =>
-        `<sheet name="${xmlEscape(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`
-    )
-    .join("");
-
-  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets>${wbSheetsXml}</sheets>
-</workbook>`;
-
-  // 4. xl/_rels/workbook.xml.rels
-  const wbRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  ${safeSheets
-    .map(
-      (_, i) =>
-        `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`
-    )
-    .join("")}
-  <Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-</Relationships>`;
-
-  // 5. xl/styles.xml (Exact matching colors from screenshot: Gray header, Teal/White rows, Red ship name, Bold TOTAL)
-  // Style indices (cellXfs):
-  // 0 = Default
-  // 1 = Header (Gray #807E7C, Bold, Border, Center)
-  // 2 = Odd Row Normal (Teal #348AA2, Bold, Border, Center)
-  // 3 = Even Row Normal (White #FFFFFF, Bold, Border, Center)
-  // 4 = Odd Row Ship Name (Teal #348AA2, Red Text #C00000, Bold, Border, Center)
-  // 5 = Even Row Ship Name (White #FFFFFF, Red Text #D91B1B, Bold, Border, Center)
-  // 6 = Total Row (Teal #348AA2, 16pt Bold, Border, Center)
-  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <fonts count="4">
-    <font><sz val="10"/><name val="Calibri"/></font>
-    <font><b/><sz val="10"/><color rgb="FF000000"/><name val="Calibri"/></font>
-    <font><b/><sz val="10"/><color rgb="FFD91B1B"/><name val="Calibri"/></font>
-    <font><b/><sz val="15"/><color rgb="FF091E26"/><name val="Calibri"/></font>
-  </fonts>
-  <fills count="5">
-    <fill><patternFill patternType="none"/></fill>
-    <fill><patternFill patternType="gray125"/></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FF807E7C"/></patternFill></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FF348AA2"/></patternFill></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FFFFFFFF"/></patternFill></fill>
-  </fills>
-  <borders count="2">
-    <border><left/><right/><top/><bottom/><diagonal/></border>
-    <border>
-      <left style="thin"><color rgb="FF1E293B"/></left>
-      <right style="thin"><color rgb="FF1E293B"/></right>
-      <top style="thin"><color rgb="FF1E293B"/></top>
-      <bottom style="thin"><color rgb="FF1E293B"/></bottom>
-      <diagonal/>
-    </border>
-  </borders>
-  <cellStyleXfs count="1">
-    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
-  </cellStyleXfs>
-  <cellXfs count="7">
-    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
-    <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="1" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="2" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="2" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="3" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-  </cellXfs>
-</styleSheet>`;
-
-  const files: { name: string; data: Uint8Array }[] = [
-    { name: "[Content_Types].xml", data: enc.encode(contentTypesXml) },
-    { name: "_rels/.rels", data: enc.encode(rootRelsXml) },
-    { name: "xl/workbook.xml", data: enc.encode(workbookXml) },
-    { name: "xl/_rels/workbook.xml.rels", data: enc.encode(wbRelsXml) },
-    { name: "xl/styles.xml", data: enc.encode(stylesXml) },
-  ];
-
-  const headers = [
-    "TARİH",
-    "KALKIŞ",
-    "VARIŞ",
-    "GEMİ ADI",
-    "KİŞİ SAYISI",
-    "TRANSFER ÜCRETİ",
-    "OTEL",
-    "YEMEK",
-    "İGAFİ",
-    "VİZE",
-    "TOTAL",
-    "NOTLAR",
-  ];
-
-  safeSheets.forEach((sheet, sIdx) => {
-    const rowXmlParts: string[] = [];
-
-    // Row 1: Headers
-    const headerCells = headers
-      .map((h, cIdx) => {
-        const ref = `${colIndexToLetter(cIdx)}1`;
-        return `<c r="${ref}" s="1" t="inlineStr"><is><t>${xmlEscape(h)}</t></is></c>`;
-      })
-      .join("");
-    rowXmlParts.push(`<row r="1" ht="24" customHeight="1">${headerCells}</row>`);
-
-    // Data Rows
-    sheet.records.forEach((r, idx) => {
-      const rowNum = idx + 2;
-      const isOdd = idx % 2 === 0; // 1st data row is Teal (s=2), 2nd is White (s=3)
-      const normalStyle = isOdd ? 2 : 3;
-      const shipStyle = isOdd ? 4 : 5;
-
-      const vals = [
-        r.tx_date || "",
-        r.departure || "",
-        r.arrival || "",
-        r.ship_name || sheet.name,
-        r.passenger_info || "",
-        formatMoneyCell(r.transfer_fee, r.currency),
-        formatMoneyCell(r.hotel_fee, r.currency),
-        formatMoneyCell(r.meal_fee, r.currency),
-        formatMoneyCell(r.igafi_fee, r.currency),
-        formatMoneyCell(r.vize_fee, r.currency),
-        formatMoneyCell(r.total_fee, r.currency),
-        r.description || "",
-      ];
-
-      const cells = vals
-        .map((v, cIdx) => {
-          const ref = `${colIndexToLetter(cIdx)}${rowNum}`;
-          const st = cIdx === 3 ? shipStyle : normalStyle;
-          return `<c r="${ref}" s="${st}" t="inlineStr"><is><t>${xmlEscape(v)}</t></is></c>`;
-        })
-        .join("");
-
-      rowXmlParts.push(`<row r="${rowNum}" ht="32" customHeight="1">${cells}</row>`);
-    });
-
-    // Final TOTAL Row
-    const totalRowNum = sheet.records.length + 2;
-    const totalSummaryStr = formatTotalSummaryCell(sheet.records);
-    const totalRowValues = ["TOTAL", "", "", "", "", totalSummaryStr, "", "", "", "", "", ""];
-    const totalCells = totalRowValues
-      .map((v, cIdx) => {
-        const ref = `${colIndexToLetter(cIdx)}${totalRowNum}`;
-        return `<c r="${ref}" s="6" t="inlineStr"><is><t>${xmlEscape(v)}</t></is></c>`;
-      })
-      .join("");
-    rowXmlParts.push(`<row r="${totalRowNum}" ht="38" customHeight="1">${totalCells}</row>`);
-
-    const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <cols>
-    <col min="1" max="1" width="15" customWidth="1"/>
-    <col min="2" max="3" width="18" customWidth="1"/>
-    <col min="4" max="4" width="18" customWidth="1"/>
-    <col min="5" max="5" width="22" customWidth="1"/>
-    <col min="6" max="11" width="18" customWidth="1"/>
-    <col min="12" max="12" width="30" customWidth="1"/>
-  </cols>
-  <sheetData>${rowXmlParts.join("")}</sheetData>
-  <mergeCells count="2">
-    <mergeCell ref="A${totalRowNum}:E${totalRowNum}"/>
-    <mergeCell ref="F${totalRowNum}:K${totalRowNum}"/>
-  </mergeCells>
-</worksheet>`;
-
-    files.push({
-      name: `xl/worksheets/sheet${sIdx + 1}.xml`,
-      data: enc.encode(sheetXml),
-    });
-  });
-
-  return createZipArchive(files);
-}
-
-export function exportShipRecordsToXlsx(
-  shipName: string,
-  records: RecordItem[]
-): Uint8Array {
-  return buildStyledWorkbookXlsx([{ name: shipName, records }]);
-}
-
-export function exportCompanyToXlsx(
-  db: AppDatabase,
-  companyId: number,
-  filters?: { start_date?: string; end_date?: string }
-): Uint8Array {
-  const ships = db.listShips(companyId);
-  if (ships.length === 0) {
-    return buildStyledWorkbookXlsx([{ name: "BOS", records: [] }]);
-  }
-  const sheetSpecs: SheetSpec[] = ships.map((ship) => ({
-    name: ship.name,
-    records: db.listRecords({
-      ship_id: ship.id,
-      start_date: filters?.start_date,
-      end_date: filters?.end_date,
-    }),
-  }));
-  return buildStyledWorkbookXlsx(sheetSpecs);
 }
 
 /**

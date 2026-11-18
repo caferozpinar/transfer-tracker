@@ -1,6 +1,7 @@
 import { AppDatabase } from "../src/db.ts";
-import { exportShipRecordsToXlsx, importRecordsFromXlsx, parseMoneyAndCurrency } from "../src/excel.ts";
+import { createZipArchive, importRecordsFromXlsx, parseMoneyAndCurrency } from "../src/excel.ts";
 import { createAppHandler } from "../src/server.ts";
+import { checkForUpdate, compareVersions, downloadVerified, sha256Hex, validateManifest } from "../src/updater.ts";
 
 function assertEquals<T>(actual: T, expected: T, msg = "") {
   const a = JSON.stringify(actual);
@@ -8,6 +9,24 @@ function assertEquals<T>(actual: T, expected: T, msg = "") {
   if (a !== b) {
     throw new Error(`Assertion failed ${msg}: expected ${b}, got ${a}`);
   }
+}
+
+// Test için küçük bir .xlsx üretir (uygulamada Excel dışa aktarma yok, yalnızca içe aktarma var).
+function makeXlsx(sheetName: string, rows: string[][]): Uint8Array {
+  const enc = new TextEncoder();
+  const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const letter = (i: number) => String.fromCharCode(65 + i);
+  const sheetData = rows
+    .map((r, ri) =>
+      `<row r="${ri + 1}">` +
+      r.map((v, ci) => `<c r="${letter(ci)}${ri + 1}" t="inlineStr"><is><t>${esc(v)}</t></is></c>`).join("") +
+      `</row>`
+    )
+    .join("");
+  return createZipArchive([
+    { name: "xl/workbook.xml", data: enc.encode(`<workbook><sheets><sheet name="${sheetName}" sheetId="1"/></sheets></workbook>`) },
+    { name: "xl/worksheets/sheet1.xml", data: enc.encode(`<worksheet><sheetData>${sheetData}</sheetData></worksheet>`) },
+  ]);
 }
 
 // Yalnızca testler için küçük örnek veri (uygulamada hazır veri yoktur).
@@ -129,30 +148,23 @@ Deno.test("2. Çoklu Para Birimi (TRY, USD, EUR) Dönüşümsüz Bağımsız Car
   }
 });
 
-Deno.test("3. Excel (.xlsx) Dışa ve İçe Aktarım (Export & Import) Doğrulaması", () => {
-  const db1 = new AppDatabase(":memory:");
-  const db2 = new AppDatabase(":memory:");
+Deno.test("3. Excel (.xlsx) İçe Aktarım: Eski 10 Sütunlu Biçim", () => {
+  const db = new AppDatabase(":memory:");
   try {
-    const { ship_id } = seedSample(db1);
-    const records = db1.listRecords({ ship_id });
-
-    // Export to .xlsx buffer
-    const xlsxBuffer = exportShipRecordsToXlsx("MV ATLAS", records);
-    if (xlsxBuffer.byteLength < 1000) {
-      throw new Error("Üretilen Excel dosyası beklenenden küçük.");
-    }
-
-    // Import into second clean database
-    const comp2 = db2.createCompany("YENİ FİRMA");
-    const importRes = importRecordsFromXlsx(db2, comp2.id, null, xlsxBuffer);
-    assertEquals(importRes.importedCount, 3, "3 satır eksiksiz içe aktarılmalı");
-    assertEquals(importRes.shipsTouched, ["MV ATLAS"]);
-
-    const summary2 = db2.getSummary();
-    assertEquals(summary2.overall_billed.TRY, 21872);
+    const xlsx = makeXlsx("MV ATLAS", [
+      ["TARİH", "KALKIŞ", "VARIŞ", "GEMİ ADI", "KİŞİ SAYISI", "TRANSFER ÜCRETİ", "OTEL", "YEMEK", "TOTAL", "ODA DETAYI"],
+      ["25.10.2026", "A", "B", "MV ATLAS", "2 KİŞİ", "4.000 ₺", "X", "X", "4.000 ₺", "TRANSFER"],
+      ["", "", "", "MV ATLAS", "2 KİŞİ", "X", "X", "X", "1.982 ₺", "AYAKBASTI"],
+      ["26.10.2026", "B", "C", "MV ATLAS", "", "350 ₺", "₺15.540", "X", "15.890 ₺", "1 TWIN ROOM"],
+      ["TOTAL", "", "", "", "", "₺21.872,00", "", "", "", ""],
+    ]);
+    const comp = db.createCompany("YENİ FİRMA");
+    const res = importRecordsFromXlsx(db, comp.id, null, xlsx);
+    assertEquals(res.importedCount, 3, "3 satır içe aktarılmalı (TOTAL satırı hariç)");
+    assertEquals(res.shipsTouched, ["MV ATLAS"]);
+    assertEquals(db.getSummary().overall_billed.TRY, 21872);
   } finally {
-    db1.close();
-    db2.close();
+    db.close();
   }
 });
 
@@ -219,7 +231,7 @@ Deno.test("6. PDF Çıktıları (gemi, firma detay, mali durum) Geçerli PDF Ür
   }
 });
 
-Deno.test("7. İGAFİ ve VİZE Toplama Dahil, Notlar Düz Metin, Excel Gidiş-Dönüş", () => {
+Deno.test("7. İGAFİ ve VİZE Toplama Dahil, Notlar Düz Metin, Excel İçe Aktarım", () => {
   const db1 = new AppDatabase(":memory:");
   const db2 = new AppDatabase(":memory:");
   try {
@@ -233,9 +245,11 @@ Deno.test("7. İGAFİ ve VİZE Toplama Dahil, Notlar Düz Metin, Excel Gidiş-D�
     assertEquals(rec.description, "Oda: 1 twin, geç giriş"); // büyük harfe çevrilmez
     assertEquals(db1.updateRecord(rec.id, { vize_fee: 80 }).total_fee, 200);
 
-    const xlsx = exportShipRecordsToXlsx("MV X", db1.listRecords({ ship_id: ship.id }));
-    const comp2 = db2.createCompany("G");
-    importRecordsFromXlsx(db2, comp2.id, null, xlsx);
+    const xlsx = makeXlsx("MV X", [
+      ["TARİH", "KALKIŞ", "VARIŞ", "GEMİ ADI", "KİŞİ SAYISI", "TRANSFER ÜCRETİ", "OTEL", "YEMEK", "İGAFİ", "VİZE", "TOTAL", "NOTLAR"],
+      ["01.11.2026", "", "", "MV X", "", "100 $", "X", "X", "20 $", "80 $", "200 $", "Oda: 1 twin, geç giriş"],
+    ]);
+    importRecordsFromXlsx(db2, db2.createCompany("G").id, null, xlsx);
     const back = db2.listRecords({})[0];
     assertEquals([back.igafi_fee, back.vize_fee, back.total_fee, back.currency], [20, 80, 200, "USD"]);
     assertEquals(back.description, "Oda: 1 twin, geç giriş");
@@ -243,4 +257,44 @@ Deno.test("7. İGAFİ ve VİZE Toplama Dahil, Notlar Düz Metin, Excel Gidiş-D�
     db1.close();
     db2.close();
   }
+});
+
+Deno.test("8. Otomatik Güncelleme: Sürüm Karşılaştırma, Manifest ve Hash Doğrulama", async () => {
+  assertEquals(compareVersions("0.10.0", "0.9.0"), 1);
+  assertEquals(compareVersions("v0.2.0", "0.2.0"), 0);
+  assertEquals(compareVersions("0.1.9", "0.2.0"), -1);
+  assertEquals(compareVersions("abc", "0.2.0"), null);
+
+  const bytes = new TextEncoder().encode("yeni-exe");
+  const sha256 = await sha256Hex(bytes);
+  const url = "https://github.com/caferozpinar/transfer-tracker/releases/download/v0.3.0/GemiTransferTakip.exe";
+  const fakeFetch = (manifest: unknown): typeof fetch => (input) => {
+    const u = String(input);
+    return Promise.resolve(u.endsWith("version.json") ? Response.json(manifest) : new Response(bytes));
+  };
+
+  // Daha yeni sürüm -> manifest; aynı/eski sürüm -> null
+  const m = { version: "0.3.0", url, sha256 };
+  assertEquals((await checkForUpdate("0.2.0", fakeFetch(m)))?.version, "0.3.0");
+  assertEquals(await checkForUpdate("0.3.0", fakeFetch(m)), null);
+  assertEquals(await checkForUpdate("0.4.0", fakeFetch(m)), null);
+
+  // Hash doğruysa indirir, yanlışsa reddeder
+  assertEquals((await downloadVerified(validateManifest(m), fakeFetch(m))).byteLength, bytes.byteLength);
+  let rejected = false;
+  try {
+    await downloadVerified(validateManifest({ ...m, sha256: "0".repeat(64) }), fakeFetch(m));
+  } catch (_) {
+    rejected = true;
+  }
+  assertEquals(rejected, true, "hash uyuşmazsa kurulmamalı");
+
+  // Başka bir siteden indirme adresi reddedilir
+  let badUrl = false;
+  try {
+    validateManifest({ ...m, url: "https://evil.example/app.exe" });
+  } catch (_) {
+    badUrl = true;
+  }
+  assertEquals(badUrl, true, "yalnızca bu repo'nun release adresi kabul edilmeli");
 });

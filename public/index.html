@@ -131,8 +131,10 @@
               <th>TRANSFER ÜCRETİ</th>
               <th>OTEL</th>
               <th>YEMEK</th>
+              <th>İGAFİ</th>
+              <th>VİZE</th>
               <th>TOTAL</th>
-              <th>ODA DETAYI</th>
+              <th>NOTLAR</th>
               <th class="col-actions">İŞLEM</th>
             </tr>
           </thead>
@@ -155,15 +157,17 @@
               <td><input type="number" step="0.01" id="qaTransfer" placeholder="Transfer (X)" inputmode="decimal" aria-label="Transfer Ücreti" /></td>
               <td><input type="number" step="0.01" id="qaHotel" placeholder="Otel (X)" inputmode="decimal" aria-label="Otel Ücreti" /></td>
               <td><input type="number" step="0.01" id="qaMeal" placeholder="Yemek (X)" inputmode="decimal" aria-label="Yemek Ücreti" /></td>
+              <td><input type="number" step="0.01" id="qaIgafi" placeholder="İGAFİ (X)" inputmode="decimal" aria-label="İGAFİ Ücreti" /></td>
+              <td><input type="number" step="0.01" id="qaVize" placeholder="Vize (X)" inputmode="decimal" aria-label="Vize Ücreti" /></td>
               <td><input type="number" step="0.01" id="qaExtra" placeholder="Ek/Doğrudan Tutar" inputmode="decimal" aria-label="Doğrudan veya Ek Tutar" title="Ayakbastı, GBT, Personel Değişimi gibi doğrudan TOTAL'e yazılan ücretler" /></td>
-              <td><input type="text" id="qaDescription" list="dlDescriptions" placeholder="TRANSFER / AYAKBASTI" aria-label="Oda Detayı / Açıklama" /></td>
+              <td><input type="text" id="qaDescription" placeholder="Not" aria-label="Notlar" /></td>
               <td>
                 <button type="button" class="btn btn-primary btn-sm" id="btnQuickAddSubmit" title="Satırı Kaydet (Enter)">Ekle</button>
               </td>
             </tr>
             <tr class="excel-total-row">
               <td colspan="5" class="excel-total-label">TOTAL</td>
-              <td colspan="4" class="excel-total-value" id="tableFooterTotal">₺0,00</td>
+              <td colspan="6" class="excel-total-value" id="tableFooterTotal">₺0,00</td>
               <td colspan="2" class="excel-total-tail"></td>
             </tr>
           </tfoot>
@@ -228,6 +232,7 @@
                 <th>GEMİ (OPSİYONEL)</th>
                 <th>AÇIKLAMA / NOT</th>
                 <th>ALINAN TUTAR</th>
+                <th>DEKONT</th>
                 <th>İŞLEM</th>
               </tr>
             </thead>
@@ -237,6 +242,20 @@
           </table>
         </div>
       </div>
+
+      <!-- DOCUMENTS (FATURA / DİĞER) -->
+      <div class="payment-history-panel">
+        <div class="panel-header">
+          <h3>Faturalar ve Diğer Belgeler</h3>
+          <div class="btn-row">
+            <button type="button" class="btn btn-primary btn-sm" data-add-doc="fatura">+ Fatura Ekle</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-add-doc="diger">+ Diğer Belge</button>
+          </div>
+        </div>
+        <p class="muted-text">Firma filtresi seçiliyse o firmaya, değilse aktif firmaya eklenir. PDF, JPG veya PNG, en fazla 15 MB.</p>
+        <div id="documentsList" class="table-scroll"></div>
+      </div>
+      <input type="file" id="docFileInput" accept=".pdf,.jpg,.jpeg,.png" hidden />
     </section>
   </main>
 
@@ -350,6 +369,14 @@
               <span>Yemek Ücreti</span>
               <input type="number" step="0.01" id="recMeal" inputmode="decimal" placeholder="0" />
             </label>
+            <label class="form-field">
+              <span>İGAFİ Ücreti</span>
+              <input type="number" step="0.01" id="recIgafi" inputmode="decimal" placeholder="0" />
+            </label>
+            <label class="form-field">
+              <span>Vize Ücreti</span>
+              <input type="number" step="0.01" id="recVize" inputmode="decimal" placeholder="0" />
+            </label>
             <label class="form-field highlight-field">
               <span>Doğrudan / Ek Tutar</span>
               <input type="number" step="0.01" id="recExtra" inputmode="decimal" placeholder="Ayakbastı/GBT vb." />
@@ -362,8 +389,8 @@
         </div>
 
         <div class="form-field">
-          <label for="recDescription">Oda Detayı / İşlem Açıklaması</label>
-          <input type="text" id="recDescription" list="dlDescriptions" placeholder="Örn: TRANSFER, AYAKBASTI, GBT, 1 TWIN ROOM" />
+          <label for="recDescription">Notlar</label>
+          <textarea id="recDescription" rows="3" placeholder="Serbest not..."></textarea>
         </div>
       </div>
 
@@ -414,6 +441,10 @@
           <span>Açıklama / Ödeme Notu</span>
           <input type="text" id="payNote" placeholder="Örn: Banka Havalesi, Nakit Tahsilat..." />
         </label>
+        <label class="form-field">
+          <span>Dekont (Opsiyonel — PDF, JPG, PNG)</span>
+          <input type="file" id="payDoc" accept=".pdf,.jpg,.jpeg,.png" />
+        </label>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-ghost" data-close-modal="modalPayment">İptal</button>
@@ -426,7 +457,7 @@
   <dialog id="modalExcel" class="app-modal">
     <div class="modal-content">
       <div class="modal-header">
-        <h3>📊 Excel (.xlsx) İndir / Yükle</h3>
+        <h3>📊 Excel / PDF</h3>
         <button type="button" class="icon-close" data-close-modal="modalExcel" aria-label="Kapat">✕</button>
       </div>
       <div class="modal-body">
@@ -436,6 +467,18 @@
           <div class="btn-row">
             <button type="button" class="btn btn-primary" id="btnExportActiveShip">Seçili Gemiyi İndir (.xlsx)</button>
             <button type="button" class="btn btn-secondary" id="btnExportActiveCompany">Seçili Firmanın Tüm Gemilerini İndir (.xlsx)</button>
+          </div>
+        </div>
+
+        <hr class="divider" />
+
+        <div class="excel-box">
+          <h4>PDF Olarak İndir</h4>
+          <p class="muted-text">Üstteki tarih filtresi PDF'e de uygulanır.</p>
+          <div class="btn-row">
+            <button type="button" class="btn btn-primary" id="btnPdfShip">Seçili Gemi Detayı (PDF)</button>
+            <button type="button" class="btn btn-secondary" id="btnPdfCompanyDetail">Firmanın Tüm Detayları (PDF)</button>
+            <button type="button" class="btn btn-secondary" id="btnPdfCompanyFinancial">Firma Mali Durumu (PDF)</button>
           </div>
         </div>
 

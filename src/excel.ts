@@ -404,8 +404,10 @@ function buildStyledWorkbookXlsx(sheets: SheetSpec[]): Uint8Array {
     "TRANSFER ÜCRETİ",
     "OTEL",
     "YEMEK",
+    "İGAFİ",
+    "VİZE",
     "TOTAL",
-    "ODA DETAYI",
+    "NOTLAR",
   ];
 
   safeSheets.forEach((sheet, sIdx) => {
@@ -436,6 +438,8 @@ function buildStyledWorkbookXlsx(sheets: SheetSpec[]): Uint8Array {
         formatMoneyCell(r.transfer_fee, r.currency),
         formatMoneyCell(r.hotel_fee, r.currency),
         formatMoneyCell(r.meal_fee, r.currency),
+        formatMoneyCell(r.igafi_fee, r.currency),
+        formatMoneyCell(r.vize_fee, r.currency),
         formatMoneyCell(r.total_fee, r.currency),
         r.description || "",
       ];
@@ -454,7 +458,7 @@ function buildStyledWorkbookXlsx(sheets: SheetSpec[]): Uint8Array {
     // Final TOTAL Row
     const totalRowNum = sheet.records.length + 2;
     const totalSummaryStr = formatTotalSummaryCell(sheet.records);
-    const totalRowValues = ["TOTAL", "", "", "", "", totalSummaryStr, "", "", "", ""];
+    const totalRowValues = ["TOTAL", "", "", "", "", totalSummaryStr, "", "", "", "", "", ""];
     const totalCells = totalRowValues
       .map((v, cIdx) => {
         const ref = `${colIndexToLetter(cIdx)}${totalRowNum}`;
@@ -470,13 +474,13 @@ function buildStyledWorkbookXlsx(sheets: SheetSpec[]): Uint8Array {
     <col min="2" max="3" width="18" customWidth="1"/>
     <col min="4" max="4" width="18" customWidth="1"/>
     <col min="5" max="5" width="22" customWidth="1"/>
-    <col min="6" max="9" width="18" customWidth="1"/>
-    <col min="10" max="10" width="24" customWidth="1"/>
+    <col min="6" max="11" width="18" customWidth="1"/>
+    <col min="12" max="12" width="30" customWidth="1"/>
   </cols>
   <sheetData>${rowXmlParts.join("")}</sheetData>
   <mergeCells count="2">
     <mergeCell ref="A${totalRowNum}:E${totalRowNum}"/>
-    <mergeCell ref="F${totalRowNum}:I${totalRowNum}"/>
+    <mergeCell ref="F${totalRowNum}:K${totalRowNum}"/>
   </mergeCells>
 </worksheet>`;
 
@@ -625,6 +629,18 @@ export function importRecordsFromXlsx(
       }
     }
 
+    // Sütunlar başlıktan bulunur; İGAFİ/VİZE olmayan eski dosyalar eski sıralamayla okunur.
+    const norm = (c: unknown) => String(c ?? "").toLocaleUpperCase("tr-TR").replace(/İ/g, "I");
+    const heads = (rows[headerIdx] ?? []).map(norm);
+    const findCol = (re: RegExp, fallback: number) => {
+      const i = heads.findIndex((h) => re.test(h));
+      return i >= 0 ? i : fallback;
+    };
+    const igafiCol = findCol(/IGAFI/, -1);
+    const vizeCol = findCol(/VIZE/, -1);
+    const totalCol = findCol(/^TOTAL/, 8);
+    const notesCol = findCol(/NOTLAR|ODA DETAY/, 9);
+
     for (let rIdx = headerIdx + 1; rIdx < rows.length; rIdx++) {
       const row = rows[rIdx];
       if (!row || row.length === 0) continue;
@@ -642,16 +658,20 @@ export function importRecordsFromXlsx(
       const rawTransfer = row[5];
       const rawHotel = row[6];
       const rawMeal = row[7];
-      const rawTotal = row[8];
-      const description = String(row[9] ?? "").trim();
+      const rawIgafi = igafiCol >= 0 ? row[igafiCol] : "";
+      const rawVize = vizeCol >= 0 ? row[vizeCol] : "";
+      const rawTotal = row[totalCol];
+      const description = String(row[notesCol] ?? "").trim();
 
       const pTransfer = parseMoneyAndCurrency(rawTransfer, "TRY");
       const pHotel = parseMoneyAndCurrency(rawHotel, pTransfer.currency);
       const pMeal = parseMoneyAndCurrency(rawMeal, pHotel.currency);
-      const pTotal = parseMoneyAndCurrency(rawTotal, pMeal.currency);
+      const pIgafi = parseMoneyAndCurrency(rawIgafi, pMeal.currency);
+      const pVize = parseMoneyAndCurrency(rawVize, pIgafi.currency);
+      const pTotal = parseMoneyAndCurrency(rawTotal, pVize.currency);
 
       const currency = pTotal.currency || pTransfer.currency || pHotel.currency || "TRY";
-      const sumParts = roundMoney(pTransfer.value + pHotel.value + pMeal.value);
+      const sumParts = roundMoney(pTransfer.value + pHotel.value + pMeal.value + pIgafi.value + pVize.value);
       let extra_fee = 0;
       if (pTotal.value > sumParts) {
         extra_fee = roundMoney(pTotal.value - sumParts);
@@ -702,6 +722,8 @@ export function importRecordsFromXlsx(
         transfer_fee: pTransfer.value,
         hotel_fee: pHotel.value,
         meal_fee: pMeal.value,
+        igafi_fee: pIgafi.value,
+        vize_fee: pVize.value,
         extra_fee,
         currency,
         description,

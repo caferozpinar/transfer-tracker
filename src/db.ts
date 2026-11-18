@@ -37,6 +37,8 @@ export interface RecordItem {
   transfer_fee: number;
   hotel_fee: number;
   meal_fee: number;
+  igafi_fee: number;
+  vize_fee: number;
   extra_fee: number;
   total_fee: number;
   currency: Currency;
@@ -54,6 +56,8 @@ export interface RecordInput {
   transfer_fee?: number;
   hotel_fee?: number;
   meal_fee?: number;
+  igafi_fee?: number;
+  vize_fee?: number;
   extra_fee?: number;
   currency?: Currency;
   description?: string;
@@ -71,6 +75,30 @@ export interface PaymentItem {
   currency: Currency;
   note: string;
   created_at: string;
+}
+
+export type DocumentKind = "dekont" | "fatura" | "diger";
+
+export interface DocumentItem {
+  id: number;
+  company_id: number;
+  payment_id: number | null;
+  record_id: number | null;
+  kind: DocumentKind;
+  filename: string;
+  mime: string;
+  size: number;
+  created_at: string;
+}
+
+export const MAX_DOCUMENT_BYTES = 15 * 1024 * 1024;
+
+// Dosya türü, istemcinin bildirdiği mime'a değil gerçek içeriğe (magic bytes) göre belirlenir.
+export function sniffDocumentMime(b: Uint8Array): string | null {
+  if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) return "application/pdf";
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return "image/png";
+  return null;
 }
 
 export interface PaymentInput {
@@ -193,6 +221,8 @@ export class AppDatabase {
         transfer_fee REAL NOT NULL DEFAULT 0,
         hotel_fee REAL NOT NULL DEFAULT 0,
         meal_fee REAL NOT NULL DEFAULT 0,
+        igafi_fee REAL NOT NULL DEFAULT 0,
+        vize_fee REAL NOT NULL DEFAULT 0,
         extra_fee REAL NOT NULL DEFAULT 0,
         total_fee REAL NOT NULL DEFAULT 0,
         currency TEXT NOT NULL DEFAULT 'TRY',
@@ -214,7 +244,29 @@ export class AppDatabase {
         FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
         FOREIGN KEY (ship_id) REFERENCES ships(id) ON DELETE SET NULL
       );
+
+      CREATE TABLE IF NOT EXISTS documents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL,
+        payment_id INTEGER,
+        record_id INTEGER,
+        kind TEXT NOT NULL DEFAULT 'diger',
+        filename TEXT NOT NULL,
+        mime TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        data BLOB NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+        FOREIGN KEY (payment_id) REFERENCES payments(id) ON DELETE CASCADE,
+        FOREIGN KEY (record_id) REFERENCES records(id) ON DELETE CASCADE
+      );
     `);
+
+    // Eski veritabanları için: sonradan eklenen sütunlar
+    const cols = (this.db.prepare("PRAGMA table_info(records)").all() as unknown as { name: string }[]).map((c) => c.name);
+    for (const col of ["igafi_fee", "vize_fee"]) {
+      if (!cols.includes(col)) this.db.exec(`ALTER TABLE records ADD COLUMN ${col} REAL NOT NULL DEFAULT 0`);
+    }
   }
 
   close() {
@@ -360,7 +412,7 @@ export class AppDatabase {
       SELECT
         r.id, r.ship_id, s.name as ship_name, s.company_id, c.name as company_name,
         r.tx_date, r.effective_date, r.departure, r.arrival, r.passenger_info,
-        r.transfer_fee, r.hotel_fee, r.meal_fee, r.extra_fee, r.total_fee,
+        r.transfer_fee, r.hotel_fee, r.meal_fee, r.igafi_fee, r.vize_fee, r.extra_fee, r.total_fee,
         r.currency, r.description, r.sort_order, r.created_at
       FROM records r
       JOIN ships s ON s.id = r.ship_id
@@ -375,8 +427,10 @@ export class AppDatabase {
     const transfer = roundMoney(input.transfer_fee ?? 0);
     const hotel = roundMoney(input.hotel_fee ?? 0);
     const meal = roundMoney(input.meal_fee ?? 0);
+    const igafi = roundMoney(input.igafi_fee ?? 0);
+    const vize = roundMoney(input.vize_fee ?? 0);
     const extra = roundMoney(input.extra_fee ?? 0);
-    const total = roundMoney(transfer + hotel + meal + extra);
+    const total = roundMoney(transfer + hotel + meal + igafi + vize + extra);
     const currency: Currency = input.currency && ["TRY", "USD", "EUR"].includes(input.currency)
       ? input.currency
       : "TRY";
@@ -393,9 +447,9 @@ export class AppDatabase {
     const stmt = this.db.prepare(`
       INSERT INTO records (
         ship_id, tx_date, effective_date, departure, arrival, passenger_info,
-        transfer_fee, hotel_fee, meal_fee, extra_fee, total_fee,
+        transfer_fee, hotel_fee, meal_fee, igafi_fee, vize_fee, extra_fee, total_fee,
         currency, description, sort_order
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       RETURNING id
     `);
 
@@ -409,10 +463,12 @@ export class AppDatabase {
       transfer,
       hotel,
       meal,
+      igafi,
+      vize,
       extra,
       total,
       currency,
-      (input.description ?? "").trim().toUpperCase(),
+      (input.description ?? "").trim(),
       sortOrder
     ) as { id: number };
 
@@ -435,13 +491,15 @@ export class AppDatabase {
     const transfer = roundMoney(input.transfer_fee !== undefined ? input.transfer_fee : existing.transfer_fee);
     const hotel = roundMoney(input.hotel_fee !== undefined ? input.hotel_fee : existing.hotel_fee);
     const meal = roundMoney(input.meal_fee !== undefined ? input.meal_fee : existing.meal_fee);
+    const igafi = roundMoney(input.igafi_fee !== undefined ? input.igafi_fee : existing.igafi_fee);
+    const vize = roundMoney(input.vize_fee !== undefined ? input.vize_fee : existing.vize_fee);
     const extra = roundMoney(input.extra_fee !== undefined ? input.extra_fee : existing.extra_fee);
-    const total = roundMoney(transfer + hotel + meal + extra);
+    const total = roundMoney(transfer + hotel + meal + igafi + vize + extra);
     const currency: Currency = input.currency && ["TRY", "USD", "EUR"].includes(input.currency)
       ? input.currency
       : existing.currency;
     const description = input.description !== undefined
-      ? input.description.trim().toUpperCase()
+      ? input.description.trim()
       : existing.description;
     const sort_order = input.sort_order !== undefined ? input.sort_order : existing.sort_order;
 
@@ -449,7 +507,7 @@ export class AppDatabase {
       UPDATE records SET
         ship_id = ?, tx_date = ?, effective_date = ?, departure = ?, arrival = ?,
         passenger_info = ?, transfer_fee = ?, hotel_fee = ?, meal_fee = ?,
-        extra_fee = ?, total_fee = ?, currency = ?, description = ?, sort_order = ?
+        igafi_fee = ?, vize_fee = ?, extra_fee = ?, total_fee = ?, currency = ?, description = ?, sort_order = ?
       WHERE id = ?
     `).run(
       ship_id,
@@ -461,6 +519,8 @@ export class AppDatabase {
       transfer,
       hotel,
       meal,
+      igafi,
+      vize,
       extra,
       total,
       currency,
@@ -546,6 +606,55 @@ export class AppDatabase {
 
   deletePayment(id: number): void {
     this.db.prepare("DELETE FROM payments WHERE id = ?").run(id);
+  }
+
+  // --- Documents (dekont / fatura) ---
+  createDocument(input: {
+    company_id: number;
+    payment_id?: number | null;
+    record_id?: number | null;
+    kind?: string;
+    filename: string;
+    data: Uint8Array;
+  }): DocumentItem {
+    if (input.data.byteLength === 0) throw new Error("Dosya boş.");
+    if (input.data.byteLength > MAX_DOCUMENT_BYTES) throw new Error("Dosya 15 MB'tan büyük olamaz.");
+    const mime = sniffDocumentMime(input.data);
+    if (!mime) throw new Error("Yalnızca PDF, JPG ve PNG yüklenebilir.");
+    const kind: DocumentKind = input.kind === "dekont" || input.kind === "fatura" ? input.kind : "diger";
+    const filename = (input.filename || "belge").replace(/[\\/\r\n"]/g, "_").slice(0, 200);
+    const row = this.db.prepare(`
+      INSERT INTO documents (company_id, payment_id, record_id, kind, filename, mime, size, data)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      RETURNING id, company_id, payment_id, record_id, kind, filename, mime, size, created_at
+    `).get(
+      input.company_id, input.payment_id ?? null, input.record_id ?? null,
+      kind, filename, mime, input.data.byteLength, input.data
+    );
+    return row as unknown as DocumentItem;
+  }
+
+  listDocuments(filters?: { company_id?: number; payment_id?: number; record_id?: number }): DocumentItem[] {
+    const cond: string[] = [];
+    const params: number[] = [];
+    if (filters?.company_id) { cond.push("company_id = ?"); params.push(filters.company_id); }
+    if (filters?.payment_id) { cond.push("payment_id = ?"); params.push(filters.payment_id); }
+    if (filters?.record_id) { cond.push("record_id = ?"); params.push(filters.record_id); }
+    const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
+    return this.db.prepare(`
+      SELECT id, company_id, payment_id, record_id, kind, filename, mime, size, created_at
+      FROM documents ${where} ORDER BY id DESC
+    `).all(...params) as unknown as DocumentItem[];
+  }
+
+  getDocumentData(id: number): { filename: string; mime: string; data: Uint8Array } | undefined {
+    return this.db.prepare("SELECT filename, mime, data FROM documents WHERE id = ?").get(id) as
+      | { filename: string; mime: string; data: Uint8Array }
+      | undefined;
+  }
+
+  deleteDocument(id: number): void {
+    this.db.prepare("DELETE FROM documents WHERE id = ?").run(id);
   }
 
   // --- Summary & Aggregations (Ship, Company, Overall, Ledger) ---

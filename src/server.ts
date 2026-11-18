@@ -1,4 +1,5 @@
 import { AppDatabase, Currency } from "./db.ts";
+import { companyDetailPdf, companyFinancialPdf, shipDetailPdf } from "./pdf.ts";
 import { exportCompanyToXlsx, exportShipRecordsToXlsx, importRecordsFromXlsx } from "./excel.ts";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -147,6 +148,8 @@ export function createAppHandler(db: AppDatabase, port = 8080) {
           transfer_fee: Number(body.transfer_fee || 0),
           hotel_fee: Number(body.hotel_fee || 0),
           meal_fee: Number(body.meal_fee || 0),
+          igafi_fee: Number(body.igafi_fee || 0),
+          vize_fee: Number(body.vize_fee || 0),
           extra_fee: Number(body.extra_fee || 0),
           currency: body.currency || "TRY",
           description: body.description,
@@ -263,6 +266,76 @@ export function createAppHandler(db: AppDatabase, port = 8080) {
           new Uint8Array(arrayBuffer)
         );
         return jsonResponse({ ok: true, ...result });
+      }
+
+      // Documents (dekont / fatura)
+      if (path === "/api/documents" && method === "GET") {
+        const n = (k: string) => Number(url.searchParams.get(k)) || undefined;
+        return jsonResponse(
+          db.listDocuments({ company_id: n("company_id"), payment_id: n("payment_id"), record_id: n("record_id") }),
+        );
+      }
+      if (path === "/api/documents" && method === "POST") {
+        const form = await req.formData();
+        const file = form.get("file");
+        const companyId = Number(form.get("company_id"));
+        if (!(file instanceof File) || !companyId) {
+          return jsonResponse({ error: "Firma ve dosya seçilmelidir." }, 400);
+        }
+        const created = db.createDocument({
+          company_id: companyId,
+          payment_id: Number(form.get("payment_id")) || null,
+          record_id: Number(form.get("record_id")) || null,
+          kind: String(form.get("kind") ?? ""),
+          filename: file.name,
+          data: new Uint8Array(await file.arrayBuffer()),
+        });
+        return jsonResponse(created, 201);
+      }
+      const docMatch = path.match(/^\/api\/documents\/(\d+)$/);
+      if (docMatch) {
+        const id = Number(docMatch[1]);
+        if (method === "DELETE") {
+          db.deleteDocument(id);
+          return jsonResponse({ ok: true });
+        }
+        if (method === "GET") {
+          const doc = db.getDocumentData(id);
+          if (!doc) return jsonResponse({ error: "Belge bulunamadı." }, 404);
+          return new Response(doc.data as Uint8Array<ArrayBuffer>, {
+            headers: {
+              "content-type": doc.mime,
+              "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(doc.filename)}`,
+              "x-content-type-options": "nosniff",
+              "content-security-policy": "sandbox",
+            },
+          });
+        }
+      }
+
+      // PDF çıktıları
+      const pdfMatch = path.match(/^\/api\/pdf\/(ship|company)\/(\d+)(?:\/(detail|financial))?$/);
+      if (pdfMatch && method === "GET") {
+        const id = Number(pdfMatch[2]);
+        const range = {
+          start_date: url.searchParams.get("start_date") || undefined,
+          end_date: url.searchParams.get("end_date") || undefined,
+        };
+        let bytes: Uint8Array;
+        let name: string;
+        if (pdfMatch[1] === "ship") {
+          bytes = await shipDetailPdf(db, publicDir, id, range);
+          name = "gemi-detay.pdf";
+        } else if (pdfMatch[3] === "financial") {
+          bytes = await companyFinancialPdf(db, publicDir, id, range);
+          name = "mali-durum.pdf";
+        } else {
+          bytes = await companyDetailPdf(db, publicDir, id, range);
+          name = "firma-detay.pdf";
+        }
+        return new Response(bytes as Uint8Array<ArrayBuffer>, {
+          headers: { "content-type": "application/pdf", "content-disposition": `attachment; filename="${name}"` },
+        });
       }
 
       // --- Static Files ---

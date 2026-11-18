@@ -413,6 +413,12 @@ p, li {
   font-weight: 600;
 }
 
+.excel-table td.cell-notes {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 260px;
+}
+
 .excel-table td.cell-total {
   font-weight: 700;
   text-align: right;

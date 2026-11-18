@@ -93,3 +93,9 @@ deno task build:linux
 ### Ortam Değişkenleri (Opsiyonel)
 - `PORT`: Varsayılan `8080` portunu değiştirmek için kullanılır (Örn: `PORT=9090`).
 - `DB_PATH`: Varsayılan `veriler.db` dosya yolunu değiştirmek için kullanılır.
+
+## Üçüncü Taraf Lisanslar
+
+- [pdf-lib](https://github.com/Hopding/pdf-lib) — MIT
+- [@pdf-lib/fontkit](https://github.com/Hopding/fontkit) — MIT
+- Noto Sans (`public/fonts/`) — SIL Open Font License 1.1 (`public/fonts/OFL.txt`)

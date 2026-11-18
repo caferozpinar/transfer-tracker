@@ -11,6 +11,7 @@ const state = {
   ships: [],
   records: [],
   payments: [],
+  documents: [],
   summary: null,
   activeCompanyId: null,
   activeShipId: null,
@@ -132,6 +133,7 @@ async function refreshAll() {
   const filterComp = document.getElementById("ledgerFilterCompany")?.value;
   if (filterComp) payParams.set("company_id", filterComp);
   state.payments = await api(`/api/payments?${payParams.toString()}`);
+  state.documents = await api(`/api/documents${filterComp ? `?company_id=${filterComp}` : ""}`);
 
   populateAutocomplete(autocomplete);
   renderAll();
@@ -215,7 +217,7 @@ function renderOperationsTableAndCards() {
   if (state.records.length === 0) {
     tbody.innerHTML = `
       <tr>
-        <td colspan="11" style="padding: 1.5rem; background:#fff; color:#475569;">
+        <td colspan="13" style="padding: 1.5rem; background:#fff; color:#475569;">
           Bu gemide henüz kayıt bulunmuyor. Aşağıdaki satırdan veya <strong>+ Yeni İşlem Ekle</strong> butonundan ekleyebilirsiniz.
         </td>
       </tr>
@@ -241,8 +243,10 @@ function renderOperationsTableAndCards() {
           <td>${fmtCellMoney(r.transfer_fee, r.currency)}</td>
           <td>${fmtCellMoney(r.hotel_fee, r.currency)}</td>
           <td>${fmtCellMoney(r.meal_fee, r.currency)}</td>
+          <td>${fmtCellMoney(r.igafi_fee, r.currency)}</td>
+          <td>${fmtCellMoney(r.vize_fee, r.currency)}</td>
           <td class="cell-total">${fmtCellMoney(r.total_fee, r.currency)}</td>
-          <td>${escapeHtml(r.description)}</td>
+          <td class="cell-notes">${escapeHtml(r.description)}</td>
           <td>
             <div class="row-action-btns">
               <button type="button" class="btn btn-secondary btn-sm" data-edit-record="${r.id}" title="Düzenle">✏️</button>
@@ -281,6 +285,8 @@ function renderOperationsTableAndCards() {
       if (r.transfer_fee > 0) feeChips.push(`Transfer: ${fmtCellMoney(r.transfer_fee, r.currency)}`);
       if (r.hotel_fee > 0) feeChips.push(`Otel: ${fmtCellMoney(r.hotel_fee, r.currency)}`);
       if (r.meal_fee > 0) feeChips.push(`Yemek: ${fmtCellMoney(r.meal_fee, r.currency)}`);
+      if (r.igafi_fee > 0) feeChips.push(`İGAFİ: ${fmtCellMoney(r.igafi_fee, r.currency)}`);
+      if (r.vize_fee > 0) feeChips.push(`Vize: ${fmtCellMoney(r.vize_fee, r.currency)}`);
       if (r.extra_fee > 0) feeChips.push(`Doğrudan: ${fmtCellMoney(r.extra_fee, r.currency)}`);
 
       return `
@@ -388,7 +394,7 @@ function renderLedgerView() {
   // Render Payment History Table
   const payTbody = document.getElementById("paymentsTableBody");
   if (state.payments.length === 0) {
-    payTbody.innerHTML = `<tr><td colspan="6" class="muted-text">Henüz kayıtlı ödeme (tahsilat) bulunmuyor.</td></tr>`;
+    payTbody.innerHTML = `<tr><td colspan="7" class="muted-text">Henüz kayıtlı ödeme (tahsilat) bulunmuyor.</td></tr>`;
   } else {
     payTbody.innerHTML = state.payments
       .map(
@@ -400,6 +406,10 @@ function renderLedgerView() {
           <td>${escapeHtml(p.note || "-")}</td>
           <td><span class="currency-pill curr-${p.currency}">${fmtExactMoney(p.amount, p.currency)}</span></td>
           <td>
+            ${state.documents.filter((d) => d.payment_id === p.id).map(docLinkHtml).join("")}
+            <button type="button" class="btn btn-ghost btn-sm" data-add-doc="dekont" data-doc-company="${p.company_id}" data-doc-payment="${p.id}">+ Dekont</button>
+          </td>
+          <td>
             <button type="button" class="btn btn-danger btn-sm" data-delete-payment="${p.id}">Sil</button>
           </td>
         </tr>
@@ -407,6 +417,32 @@ function renderLedgerView() {
       )
       .join("");
   }
+  renderDocuments();
+}
+
+function docLinkHtml(d) {
+  return `<div><a href="/api/documents/${d.id}" target="_blank" rel="noopener">${escapeHtml(d.filename)}</a>
+    <button type="button" class="btn btn-ghost btn-sm" data-delete-doc="${d.id}" aria-label="Belgeyi sil">✕</button></div>`;
+}
+
+function renderDocuments() {
+  const docs = state.documents.filter((d) => !d.payment_id);
+  const names = Object.fromEntries(state.companies.map((c) => [c.id, c.name]));
+  document.getElementById("documentsList").innerHTML = docs.length
+    ? `<table class="clean-table"><thead><tr><th>TÜR</th><th>FİRMA</th><th>BELGE</th><th>TARİH</th></tr></thead><tbody>` +
+      docs.map((d) => `<tr><td>${escapeHtml(d.kind)}</td><td>${escapeHtml(names[d.company_id] || "")}</td><td>${docLinkHtml(d)}</td><td>${escapeHtml(d.created_at.slice(0, 10))}</td></tr>`).join("") +
+      `</tbody></table>`
+    : `<p class="muted-text">Henüz belge yok.</p>`;
+}
+
+async function uploadDocument(file, fields) {
+  const fd = new FormData();
+  fd.append("file", file);
+  for (const [k, v] of Object.entries(fields)) if (v) fd.append(k, String(v));
+  const res = await fetch("/api/documents", { method: "POST", body: fd });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Belge yüklenemedi.");
+  return data;
 }
 
 // --- View & Display Mode Switching ---
@@ -435,9 +471,11 @@ function updateLiveModalTotal() {
   const t = Number(document.getElementById("recTransfer").value || 0);
   const h = Number(document.getElementById("recHotel").value || 0);
   const m = Number(document.getElementById("recMeal").value || 0);
+  const g = Number(document.getElementById("recIgafi").value || 0);
+  const v = Number(document.getElementById("recVize").value || 0);
   const e = Number(document.getElementById("recExtra").value || 0);
   const curr = document.getElementById("recCurrency").value || "TRY";
-  document.getElementById("recLiveTotal").textContent = fmtExactMoney(t + h + m + e, curr);
+  document.getElementById("recLiveTotal").textContent = fmtExactMoney(t + h + m + g + v + e, curr);
 }
 
 function openRecordModal(record = null) {
@@ -459,6 +497,8 @@ function openRecordModal(record = null) {
   document.getElementById("recTransfer").value = record && record.transfer_fee ? record.transfer_fee : "";
   document.getElementById("recHotel").value = record && record.hotel_fee ? record.hotel_fee : "";
   document.getElementById("recMeal").value = record && record.meal_fee ? record.meal_fee : "";
+  document.getElementById("recIgafi").value = record && record.igafi_fee ? record.igafi_fee : "";
+  document.getElementById("recVize").value = record && record.vize_fee ? record.vize_fee : "";
   document.getElementById("recExtra").value = record && record.extra_fee ? record.extra_fee : "";
   document.getElementById("recDescription").value = record ? record.description : "";
 
@@ -646,6 +686,8 @@ document.addEventListener("DOMContentLoaded", () => {
       transfer_fee: Number(document.getElementById("qaTransfer").value || 0),
       hotel_fee: Number(document.getElementById("qaHotel").value || 0),
       meal_fee: Number(document.getElementById("qaMeal").value || 0),
+      igafi_fee: Number(document.getElementById("qaIgafi").value || 0),
+      vize_fee: Number(document.getElementById("qaVize").value || 0),
       extra_fee: Number(document.getElementById("qaExtra").value || 0),
       description: document.getElementById("qaDescription").value,
     };
@@ -659,6 +701,8 @@ document.addEventListener("DOMContentLoaded", () => {
       document.getElementById("qaTransfer").value = "";
       document.getElementById("qaHotel").value = "";
       document.getElementById("qaMeal").value = "";
+      document.getElementById("qaIgafi").value = "";
+      document.getElementById("qaVize").value = "";
       document.getElementById("qaExtra").value = "";
       document.getElementById("qaDescription").value = "";
       await refreshAll();
@@ -709,7 +753,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  ["recTransfer", "recHotel", "recMeal", "recExtra", "recCurrency"].forEach((id) => {
+  ["recTransfer", "recHotel", "recMeal", "recIgafi", "recVize", "recExtra", "recCurrency"].forEach((id) => {
     document.getElementById(id).addEventListener("input", updateLiveModalTotal);
   });
 
@@ -727,6 +771,8 @@ document.addEventListener("DOMContentLoaded", () => {
       transfer_fee: Number(document.getElementById("recTransfer").value || 0),
       hotel_fee: Number(document.getElementById("recHotel").value || 0),
       meal_fee: Number(document.getElementById("recMeal").value || 0),
+      igafi_fee: Number(document.getElementById("recIgafi").value || 0),
+      vize_fee: Number(document.getElementById("recVize").value || 0),
       extra_fee: Number(document.getElementById("recExtra").value || 0),
       description: document.getElementById("recDescription").value,
     };
@@ -801,11 +847,65 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    const addDocBtn = e.target.closest("[data-add-doc]");
+    if (addDocBtn) {
+      const company_id = Number(addDocBtn.dataset.docCompany) ||
+        Number(document.getElementById("ledgerFilterCompany").value) || state.activeCompanyId;
+      if (!company_id) return alert("Önce bir firma seçin.");
+      state.pendingDoc = { company_id, payment_id: addDocBtn.dataset.docPayment, kind: addDocBtn.dataset.addDoc };
+      document.getElementById("docFileInput").click();
+      return;
+    }
+
+    const delDocBtn = e.target.closest("[data-delete-doc]");
+    if (delDocBtn) {
+      if (!confirm("Bu belgeyi silmek istediğinize emin misiniz?")) return;
+      try {
+        await api(`/api/documents/${delDocBtn.dataset.deleteDoc}`, { method: "DELETE" });
+        await refreshAll();
+      } catch (err) {
+        alert(err.message);
+      }
+      return;
+    }
+
     const closeModalBtn = e.target.closest("[data-close-modal]");
     if (closeModalBtn) {
       const modalId = closeModalBtn.getAttribute("data-close-modal");
       document.getElementById(modalId)?.close();
     }
+  });
+
+  document.getElementById("docFileInput").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file || !state.pendingDoc) return;
+    try {
+      await uploadDocument(file, state.pendingDoc);
+      await refreshAll();
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+
+  // PDF çıktıları
+  const pdf = (path) => {
+    const params = new URLSearchParams();
+    if (state.startDate) params.set("start_date", state.startDate);
+    if (state.endDate) params.set("end_date", state.endDate);
+    window.location.href = `/api/pdf/${path}?${params.toString()}`;
+  };
+  document.getElementById("btnPdfShip").addEventListener("click", () => {
+    if (!state.activeShipId) return alert("Önce bir gemi seçin.");
+    pdf(`ship/${state.activeShipId}`);
+  });
+  document.getElementById("btnPdfCompanyDetail").addEventListener("click", () => {
+    if (!state.activeCompanyId) return alert("Önce bir firma seçin.");
+    pdf(`company/${state.activeCompanyId}/detail`);
+  });
+  document.getElementById("btnPdfCompanyFinancial").addEventListener("click", () => {
+    if (!state.activeCompanyId) return alert("Önce bir firma seçin.");
+    pdf(`company/${state.activeCompanyId}/financial`);
   });
 
   // Payment Modal
@@ -826,10 +926,19 @@ document.addEventListener("DOMContentLoaded", () => {
     };
 
     try {
-      await api("/api/payments", {
+      const created = await api("/api/payments", {
         method: "POST",
         body: JSON.stringify(payload),
       });
+      const docFile = document.getElementById("payDoc").files[0];
+      if (docFile) {
+        try {
+          await uploadDocument(docFile, { company_id: payload.company_id, payment_id: created.id, kind: "dekont" });
+        } catch (err) {
+          alert(`Ödeme kaydedildi ama dekont yüklenemedi: ${err.message}`);
+        }
+      }
+      document.getElementById("formPayment").reset();
       document.getElementById("modalPayment").close();
       await refreshAll();
     } catch (err) {

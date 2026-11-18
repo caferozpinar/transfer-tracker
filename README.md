@@ -6,7 +6,7 @@ Gemi acenteleri ve operasyon firmaları için **Firma → Gemi → İşlem Tablo
 
 ## ✨ Özellikler
 
-1. **Firma ve gemi bazlı tablolar:** `Tarih | Kalkış | Varış | Kişi | Transfer | Otel | Yemek | İGAFİ | Vize | Ek | Toplam | Notlar`. Boş tutarlar soluk `–` olarak görünür. `Ek`, Ayakbastı/GBT gibi doğrudan toplama yazılan tutarlar içindir. Notlar serbest metindir.
+1. **Firma ve gemi bazlı tablolar:** `Tarih | Kalkış | Varış | Kişi | Transfer | Otel | Yemek | Airport | Vize | Ek | Toplam | Notlar`. Boş tutarlar soluk `–` olarak görünür. `Ek`, Ayakbastı/GBT gibi doğrudan toplama yazılan tutarlar içindir. Notlar serbest metindir.
 2. **Mali durum:** Firma bazında **Yapılan iş**, **Alınan ödeme**, **Kalan**. Para birimleri birbirine çevrilmez, ayrı ayrı izlenir.
 3. **Belgeler ekranı:** Yüklenen belgelerin listesi ve **PDF oluşturma**. Dört tür: gemi maliyet tablosu, firma tüm gemiler, ödeme dökümü, mali durum. İsteğe bağlı başlık, açıklama ve tarih aralığı. Seçilen belgeler (PDF'ler ve resimler) PDF'in sonunda bir "Ekler" dizini ile birlikte birleştirilir; eklenemeyen belge olursa bildirilir.
 4. **Belge yükleme:** Firmaya, gemiye, işlem satırına veya ödemeye bağlanır (PDF, JPG, PNG; en fazla 15 MB). Her belgeye başlık ve açıklama eklenebilir. Belgeler `veriler.db` içinde saklanır.

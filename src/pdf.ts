@@ -277,7 +277,7 @@ const RECORD_COLS: Col[] = [
   { title: "Transfer", w: 58, right: true },
   { title: "Otel", w: 54, right: true },
   { title: "Yemek", w: 50, right: true },
-  { title: "İGAFİ", w: 50, right: true },
+  { title: "Airport", w: 50, right: true },
   { title: "Vize", w: 50, right: true },
   { title: "Ek", w: 50, right: true },
   { title: "Toplam", w: 66, right: true },

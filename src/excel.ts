@@ -332,14 +332,14 @@ export function importRecordsFromXlsx(
       }
     }
 
-    // Sütunlar başlıktan bulunur; İGAFİ/VİZE olmayan eski dosyalar eski sıralamayla okunur.
+    // Sütunlar başlıktan bulunur (Airport, eski adıyla İGAFİ); Airport/VİZE olmayan eski dosyalar eski sıralamayla okunur.
     const norm = (c: unknown) => String(c ?? "").toLocaleUpperCase("tr-TR").replace(/İ/g, "I");
     const heads = (rows[headerIdx] ?? []).map(norm);
     const findCol = (re: RegExp, fallback: number) => {
       const i = heads.findIndex((h) => re.test(h));
       return i >= 0 ? i : fallback;
     };
-    const igafiCol = findCol(/IGAFI/, -1);
+    const igafiCol = findCol(/IGAFI|AIRPORT/, -1);
     const vizeCol = findCol(/VIZE/, -1);
     const totalCol = findCol(/^TOTAL/, 8);
     const notesCol = findCol(/NOTLAR|ODA DETAY/, 9);

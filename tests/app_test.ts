@@ -280,7 +280,7 @@ Deno.test("6. PDF Oluşturma: 4 tür, varsayılan başlık, sonda ekler (PDF + r
   }
 });
 
-Deno.test("7. İGAFİ ve VİZE Toplama Dahil, Notlar Düz Metin, Excel İçe Aktarım", () => {
+Deno.test("7. Airport ve VİZE Toplama Dahil, Notlar Düz Metin, Excel İçe Aktarım", () => {
   const db1 = new AppDatabase(":memory:");
   const db2 = new AppDatabase(":memory:");
   try {
@@ -295,7 +295,7 @@ Deno.test("7. İGAFİ ve VİZE Toplama Dahil, Notlar Düz Metin, Excel İçe Akt
     assertEquals(db1.updateRecord(rec.id, { vize_fee: 80 }).total_fee, 200);
 
     const xlsx = makeXlsx("MV X", [
-      ["TARİH", "KALKIŞ", "VARIŞ", "GEMİ ADI", "KİŞİ SAYISI", "TRANSFER ÜCRETİ", "OTEL", "YEMEK", "İGAFİ", "VİZE", "TOTAL", "NOTLAR"],
+      ["TARİH", "KALKIŞ", "VARIŞ", "GEMİ ADI", "KİŞİ SAYISI", "TRANSFER ÜCRETİ", "OTEL", "YEMEK", "AIRPORT", "VİZE", "TOTAL", "NOTLAR"],
       ["01.11.2026", "", "", "MV X", "", "100 $", "X", "X", "20 $", "80 $", "200 $", "Oda: 1 twin, geç giriş"],
     ]);
     importRecordsFromXlsx(db2, db2.createCompany("G").id, null, xlsx);

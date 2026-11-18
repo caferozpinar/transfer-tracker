@@ -367,7 +367,7 @@ function renderOperations() {
         ["Transfer", r.transfer_fee],
         ["Otel", r.hotel_fee],
         ["Yemek", r.meal_fee],
-        ["İGAFİ", r.igafi_fee],
+        ["Airport", r.igafi_fee],
         ["Vize", r.vize_fee],
         ["Ek", r.extra_fee],
       ]

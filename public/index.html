@@ -21,6 +21,7 @@
       <nav class="main-nav" aria-label="Ana ekranlar">
         <button type="button" class="nav-tab active" id="tabOperations">İşlemler</button>
         <button type="button" class="nav-tab" id="tabLedger">Mali Durum</button>
+        <button type="button" class="nav-tab" id="tabDocuments">Belgeler</button>
       </nav>
 
       <details class="menu header-menu">
@@ -71,14 +72,7 @@
               <button type="button" class="btn btn-sm" id="btnClearFilter">Temizle</button>
             </div>
           </details>
-          <details class="menu">
-            <summary class="btn">PDF indir</summary>
-            <div class="menu-list">
-              <button type="button" data-pdf="ship">Bu geminin detayı</button>
-              <button type="button" data-pdf="company-detail">Firmanın tüm detayları</button>
-              <button type="button" data-pdf="company-financial">Firmanın mali durumu</button>
-            </div>
-          </details>
+          <button type="button" class="btn" id="btnShipDoc">Gemiye Belge Ekle</button>
           <button type="button" class="btn btn-primary" id="btnOpenRecordModal">Yeni İşlem</button>
         </div>
       </div>
@@ -89,7 +83,7 @@
           <colgroup>
             <col style="width:96px"><col style="width:100px"><col style="width:100px"><col style="width:130px">
             <col style="width:84px"><col style="width:84px"><col style="width:84px"><col style="width:84px"><col style="width:84px"><col style="width:84px">
-            <col style="width:104px"><col><col style="width:132px">
+            <col style="width:104px"><col><col style="width:200px">
           </colgroup>
           <thead>
             <tr>
@@ -103,9 +97,9 @@
           <tfoot>
             <tr class="quick-add" id="desktopQuickAddRow">
               <td><input type="text" id="qaDate" placeholder="gg.aa.yyyy" aria-label="Tarih" /></td>
-              <td><input type="text" id="qaDeparture" list="dlLocations" aria-label="Kalkış" /></td>
-              <td><input type="text" id="qaArrival" list="dlLocations" aria-label="Varış" /></td>
-              <td><input type="text" id="qaPassenger" list="dlPassengers" aria-label="Kişi" /></td>
+              <td><input type="text" id="qaDeparture" aria-label="Kalkış" /></td>
+              <td><input type="text" id="qaArrival" aria-label="Varış" /></td>
+              <td><input type="text" id="qaPassenger" aria-label="Kişi" /></td>
               <td><input type="number" step="0.01" id="qaTransfer" inputmode="decimal" aria-label="Transfer" /></td>
               <td><input type="number" step="0.01" id="qaHotel" inputmode="decimal" aria-label="Otel" /></td>
               <td><input type="number" step="0.01" id="qaMeal" inputmode="decimal" aria-label="Yemek" /></td>
@@ -168,30 +162,69 @@
         </div>
       </div>
 
+    </section>
+
+    <!-- ==================== BELGELER ==================== -->
+    <section id="viewDocuments" class="view">
+      <div class="toolbar"><div class="toolbar-title"><h2>Belgeler</h2></div></div>
+
+      <div class="panel panel-first">
+        <div class="panel-head"><h3>Belge oluştur</h3></div>
+        <form id="formBuild" class="build-form">
+          <div class="grid-2">
+            <label class="field">
+              <span>Belge türü</span>
+              <select id="buildType">
+                <option value="ship-cost">Gemi maliyet tablosu (geminin tüm işlemleri)</option>
+                <option value="company-ships">Firma tüm gemiler (bütün gemilerin işlemleri)</option>
+                <option value="payments">Ödeme dökümü (para transferleri)</option>
+                <option value="financial">Mali durum (yapılan iş, ödeme, kalan)</option>
+              </select>
+            </label>
+            <label class="field"><span>Firma</span><select id="buildCompany"></select></label>
+            <label class="field" id="buildShipField"><span id="buildShipLabel">Gemi</span><select id="buildShip"></select></label>
+            <div class="grid-2 inner">
+              <label class="field"><span>Başlangıç</span><input type="date" id="buildStart" /></label>
+              <label class="field"><span>Bitiş</span><input type="date" id="buildEnd" /></label>
+            </div>
+          </div>
+          <label class="field"><span>Başlık (boşsa otomatik)</span><input type="text" id="buildTitle" placeholder="Otomatik başlık kullanılır" /></label>
+          <label class="field"><span>Açıklama (isteğe bağlı)</span><textarea id="buildDescription" rows="2" placeholder="PDF'in ilk sayfasında başlığın altına yazılır"></textarea></label>
+
+          <div class="field">
+            <span>Eklenecek belgeler (PDF'in sonunda toplanır)</span>
+            <div class="btn-row attach-tools">
+              <button type="button" class="btn btn-sm" id="btnAttachAll">Hepsini seç</button>
+              <button type="button" class="btn btn-sm" id="btnAttachNone">Hiçbirini seçme</button>
+            </div>
+            <div id="buildAttachments" class="attach-list"></div>
+          </div>
+          <button type="submit" class="btn btn-primary" id="btnBuild">PDF oluştur</button>
+        </form>
+      </div>
+
       <div class="panel">
         <div class="panel-head">
-          <h3>Faturalar ve belgeler</h3>
+          <h3>Yüklenen belgeler</h3>
           <div class="btn-row">
-            <button type="button" class="btn btn-sm btn-primary" data-add-doc="fatura">Fatura Ekle</button>
-            <button type="button" class="btn btn-sm" data-add-doc="diger">Başka Belge Ekle</button>
+            <select id="docFilterCompany" class="control" aria-label="Firma"></select>
+            <select id="docFilterShip" class="control" aria-label="Gemi"></select>
+            <button type="button" class="btn btn-primary" id="btnCompanyDoc">Firmaya Belge Ekle</button>
           </div>
         </div>
-        <p class="hint">Üstteki firma filtresi seçiliyse o firmaya, değilse işlemlerde seçili firmaya eklenir. PDF, JPG veya PNG; en fazla 15 MB.</p>
+        <p class="hint">Gemiye, işleme ve ödemeye bağlı belgeler de burada görünür. İşlem satırlarına İşlemler ekranından, ödemelere Mali Durum ekranından belge eklenir. PDF, JPG veya PNG; en fazla 15 MB.</p>
         <div id="documentsList" class="table-wrap table-simple"></div>
       </div>
-      <input type="file" id="docFileInput" accept=".pdf,.jpg,.jpeg,.png" hidden />
     </section>
   </main>
 
   <nav class="bottom-nav" aria-label="Alt menü">
     <button type="button" class="active" id="mNavOperations">İşlemler</button>
     <button type="button" id="mNavLedger">Mali Durum</button>
+    <button type="button" id="mNavDocuments">Belgeler</button>
   </nav>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-
-  <datalist id="dlLocations"></datalist>
-  <datalist id="dlPassengers"></datalist>
 
   <!-- ===== Yeni / düzenle işlem ===== -->
   <dialog id="modalRecord" class="modal">
@@ -225,10 +258,10 @@
               <option value="EUR">€ Euro</option>
             </select>
           </label>
-          <label class="field"><span>Kalkış</span><input type="text" id="recDeparture" list="dlLocations" /></label>
-          <label class="field"><span>Varış</span><input type="text" id="recArrival" list="dlLocations" /></label>
+          <label class="field"><span>Kalkış</span><input type="text" id="recDeparture" /></label>
+          <label class="field"><span>Varış</span><input type="text" id="recArrival" /></label>
         </div>
-        <label class="field"><span>Kişi</span><input type="text" id="recPassenger" list="dlPassengers" placeholder="Örn: 2 kişi teknisyen" /></label>
+        <label class="field"><span>Kişi</span><input type="text" id="recPassenger" placeholder="Örn: 2 kişi teknisyen" /></label>
 
         <fieldset class="fees">
           <legend>Ücretler (boş bırakılan 0 sayılır)</legend>
@@ -247,6 +280,34 @@
       </div>
       <div class="modal-foot">
         <button type="button" class="btn" data-close-modal="modalRecord">İptal</button>
+        <button type="submit" class="btn btn-primary">Kaydet</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ===== Belge ekle / düzenle ===== -->
+  <dialog id="modalDoc" class="modal">
+    <form id="formDoc">
+      <div class="modal-head">
+        <h3 id="modalDocTitle">Belge ekle</h3>
+        <button type="button" class="btn btn-quiet btn-sm" data-close-modal="modalDoc">Kapat</button>
+      </div>
+      <div class="modal-body">
+        <p class="hint">Bağlanacağı yer: <strong id="docScopeLabel"></strong></p>
+        <label class="field" id="docFileField"><span>Dosya (PDF, JPG, PNG)</span><input type="file" id="docFile" accept=".pdf,.jpg,.jpeg,.png" /></label>
+        <label class="field">
+          <span>Tür</span>
+          <select id="docKind">
+            <option value="dekont">Dekont</option>
+            <option value="fatura">Fatura</option>
+            <option value="diger">Başka belge</option>
+          </select>
+        </label>
+        <label class="field"><span>Başlık (boşsa dosya adı)</span><input type="text" id="docTitle" /></label>
+        <label class="field"><span>Açıklama (isteğe bağlı)</span><textarea id="docDescription" rows="3"></textarea></label>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn" data-close-modal="modalDoc">İptal</button>
         <button type="submit" class="btn btn-primary">Kaydet</button>
       </div>
     </form>

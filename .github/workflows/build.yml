@@ -83,10 +83,16 @@ jobs:
           Start-Sleep -Seconds 6
           try {
             $c = Invoke-RestMethod -Method Post -Uri http://localhost:8089/api/companies -ContentType 'application/json' -Body '{"name":"SMOKE"}'
-            Invoke-WebRequest -Uri "http://localhost:8089/api/pdf/company/$($c.id)/financial" -OutFile smoke.pdf
+            $body = @{ type = "financial"; company_id = $c.id } | ConvertTo-Json
+            Invoke-WebRequest -Method Post -Uri http://localhost:8089/api/pdf/build -ContentType 'application/json' -Body $body -OutFile smoke.pdf
             $head = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("$PWD\smoke.pdf"), 0, 5)
             if ($head -ne "%PDF-") { throw "Gecersiz PDF basligi: $head" }
-            Write-Host "PDF OK ($((Get-Item smoke.pdf).Length) bayt)"
+            # Ek testi: uretilen PDF'i belge olarak yukle, sonra eklemeli PDF uret
+            $doc = Invoke-RestMethod -Method Post -Uri http://localhost:8089/api/documents -Form @{ file = Get-Item smoke.pdf; company_id = $c.id; kind = "dekont"; title = "Smoke ek" }
+            $body2 = @{ type = "financial"; company_id = $c.id; document_ids = @($doc.id) } | ConvertTo-Json
+            Invoke-WebRequest -Method Post -Uri http://localhost:8089/api/pdf/build -ContentType 'application/json' -Body $body2 -OutFile smoke2.pdf
+            if ((Get-Item smoke2.pdf).Length -le (Get-Item smoke.pdf).Length) { throw "Ek PDF'e eklenmemis" }
+            Write-Host "PDF OK ($((Get-Item smoke.pdf).Length) bayt), ekli PDF OK ($((Get-Item smoke2.pdf).Length) bayt)"
           } catch {
             Get-Content out.log, err.log -ErrorAction SilentlyContinue
             throw

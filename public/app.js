@@ -17,7 +17,8 @@ const state = {
   startDate: "",
   endDate: "",
   openCompanies: new Set(),
-  pendingDoc: null,
+  docScope: null, // belge penceresi: { company_id | ship_id | record_id | payment_id } veya düzenlenen belge
+  docEditId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -97,44 +98,116 @@ function dateParams() {
   return p;
 }
 
-// Tarayıcı kendi başına indirir; dosya ve hata durumunu kullanıcıya göstermek için fetch kullanılır.
-async function downloadPdf(path, fallbackName) {
-  notify("PDF hazırlanıyor…");
-  try {
-    const q = dateParams().toString();
-    const res = await fetch(`/api/pdf/${path}${q ? `?${q}` : ""}`);
-    if (!res.ok) {
-      let msg = "PDF oluşturulamadı.";
-      try {
-        msg = (await res.json()).error || msg;
-      } catch { /* JSON değil */ }
-      throw new Error(msg);
-    }
-    const blob = await res.blob();
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = fallbackName;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
-    notify(`PDF indirildi: ${fallbackName}`);
-  } catch (err) {
-    notify(err.message, true);
-  }
+function safeName(str) {
+  return String(str || "").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "");
 }
 
-function pdfFor(kind, companyId = state.activeCompanyId) {
-  const comp = state.companies.find((c) => c.id === companyId);
-  const safe = (s) => String(s || "").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "");
-  if (kind === "ship") {
-    const ship = state.ships.find((s) => s.id === state.activeShipId);
-    if (!ship) return notify("Önce bir gemi seçin.", true);
-    return downloadPdf(`ship/${ship.id}`, `${safe(ship.name)}-detay.pdf`);
+function saveBlob(blob, filename) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+}
+
+// --- Belge oluştur (Belgeler ekranı) ---
+const BUILD_TYPES = {
+  "ship-cost": "maliyet-tablosu",
+  "company-ships": "tum-gemiler",
+  "payments": "odeme-dokumu",
+  "financial": "mali-durum",
+};
+
+function buildDefaultChecked(type, shipId, d) {
+  if (type === "ship-cost") return d.ship_id === shipId;
+  if (type === "company-ships") return !d.payment_id;
+  if (type === "payments") return !!d.payment_id && (!shipId || d.ship_id === shipId);
+  return !!d.payment_id || !d.ship_id; // financial: ödeme belgeleri + firma geneli
+}
+
+function companyOptions(selected) {
+  return state.companies
+    .map((c) => `<option value="${c.id}" ${c.id === Number(selected) ? "selected" : ""}>${escapeHtml(c.name)}</option>`)
+    .join("");
+}
+
+function shipOptions(companyId, selected, allLabel) {
+  return (allLabel ? `<option value="">${allLabel}</option>` : "") +
+    state.ships
+      .filter((x) => x.company_id === Number(companyId))
+      .map((x) => `<option value="${x.id}" ${x.id === Number(selected) ? "selected" : ""}>${escapeHtml(x.name)}</option>`)
+      .join("");
+}
+
+function renderBuildAttachments() {
+  const type = $("buildType").value;
+  const companyId = Number($("buildCompany").value);
+  const shipId = Number($("buildShip").value) || null;
+  const docs = state.documents.filter((d) => d.company_id === companyId).sort((a, b) => a.id - b.id);
+  $("buildAttachments").innerHTML = docs.length
+    ? docs
+        .map((d) => `<label class="attach-item">
+          <input type="checkbox" value="${d.id}" ${buildDefaultChecked(type, shipId, d) ? "checked" : ""} />
+          <span>${escapeHtml(d.title || d.filename)}<small>${escapeHtml(DOC_KIND[d.kind] || "Belge")} · ${escapeHtml(d.ref_label)}</small></span>
+        </label>`)
+        .join("")
+    : `<div class="attach-empty">Bu firmaya ait yüklenmiş belge yok.</div>`;
+}
+
+function renderBuildForm() {
+  const type = $("buildType").value;
+  const needsShip = type === "ship-cost" || type === "payments";
+  $("buildShipField").hidden = !needsShip;
+  $("buildShipLabel").textContent = type === "payments" ? "Gemi (boşsa firmanın tüm ödemeleri)" : "Gemi";
+  const company = $("buildCompany").value;
+  const keep = $("buildShip").value;
+  $("buildShip").innerHTML = shipOptions(company, keep, type === "payments" ? "Tüm ödemeler" : "");
+  renderBuildAttachments();
+}
+
+async function submitBuild(e) {
+  e.preventDefault();
+  const type = $("buildType").value;
+  const company_id = Number($("buildCompany").value);
+  const ship_id = Number($("buildShip").value) || null;
+  if (!company_id) return notify("Önce bir firma seçin.", true);
+  if (type === "ship-cost" && !ship_id) return notify("Gemi maliyet tablosu için gemi seçin.", true);
+  const document_ids = [...document.querySelectorAll("#buildAttachments input:checked")].map((i) => Number(i.value));
+  const title = $("buildTitle").value.trim();
+  notify("PDF hazırlanıyor…");
+  $("btnBuild").disabled = true;
+  try {
+    const res = await fetch("/api/pdf/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type, company_id, ship_id,
+        start_date: $("buildStart").value, end_date: $("buildEnd").value,
+        title, description: $("buildDescription").value, document_ids,
+      }),
+    });
+    if (!res.ok) {
+      let msg = "PDF oluşturulamadı.";
+      try { msg = (await res.json()).error || msg; } catch { /* JSON değil */ }
+      throw new Error(msg);
+    }
+    const skipped = JSON.parse(decodeURIComponent(res.headers.get("x-skipped-attachments") || "[]"));
+    const company = state.companies.find((c) => c.id === company_id);
+    const name = `${safeName(title || company?.name)}-${BUILD_TYPES[type]}.pdf`;
+    saveBlob(await res.blob(), name);
+    notify(
+      skipped.length
+        ? `PDF indirildi ama ${skipped.length} ek eklenemedi: ${skipped.map((k) => `${k.title} (${k.reason})`).join(", ")}`
+        : `PDF indirildi: ${name}`,
+      skipped.length > 0,
+    );
+  } catch (err) {
+    notify(err.message, true);
+  } finally {
+    $("btnBuild").disabled = false;
   }
-  if (!comp) return notify("Önce bir firma seçin.", true);
-  const suffix = kind === "company-financial" ? "mali-durum" : "detay";
-  downloadPdf(`company/${comp.id}/${kind === "company-financial" ? "financial" : "detail"}`, `${safe(comp.name)}-${suffix}.pdf`);
 }
 
 // --- Seçimi hatırla ---
@@ -154,11 +227,10 @@ function loadSelection() {
 // --- Veri yükleme ---
 async function refreshAll() {
   const params = dateParams();
-  const [companies, ships, summary, autocomplete] = await Promise.all([
+  const [companies, ships, summary] = await Promise.all([
     api("/api/companies"),
     api("/api/ships"),
     api(`/api/summary?${params.toString()}`),
-    api("/api/autocomplete"),
   ]);
   state.companies = companies;
   state.ships = ships;
@@ -193,11 +265,7 @@ async function refreshAll() {
   const filterComp = $("ledgerFilterCompany").value;
   if (filterComp) payParams.set("company_id", filterComp);
   state.payments = await api(`/api/payments?${payParams.toString()}`);
-  state.documents = await api(`/api/documents${filterComp ? `?company_id=${filterComp}` : ""}`);
-
-  for (const [id, list] of [["dlLocations", autocomplete.locations], ["dlPassengers", autocomplete.passengers]]) {
-    $(id).innerHTML = (list || []).map((v) => `<option value="${escapeHtml(v)}"></option>`).join("");
-  }
+  state.documents = await api("/api/documents");
   renderAll();
 }
 
@@ -207,6 +275,7 @@ function renderAll() {
   renderTotals();
   renderOperations();
   renderLedger();
+  renderDocumentsView();
   $("filterSummary").textContent =
     state.startDate || state.endDate
       ? `Tarih aralığı: ${isoToDisplay(state.startDate) || "…"} – ${isoToDisplay(state.endDate) || "…"}`
@@ -238,6 +307,13 @@ function renderTotals() {
   $("companySummaryTitle").textContent = comp ? `Firma (${comp.company_name})` : "Firma";
   $("companySummaryValues").innerHTML = pillsHtml(comp?.billed);
   $("overallSummaryValues").innerHTML = pillsHtml(state.summary.overall_billed);
+}
+
+const DOC_KIND = { dekont: "Dekont", fatura: "Fatura", diger: "Belge" };
+
+function docBtnLabel(recordId) {
+  const n = state.documents.filter((d) => d.record_id === recordId).length;
+  return n ? `Belge (${n})` : "Belge";
 }
 
 function renderOperations() {
@@ -273,6 +349,7 @@ function renderOperations() {
         <td class="notes">${escapeHtml(r.description)}</td>
         <td><div class="row-actions">
           <button type="button" class="btn btn-sm btn-quiet" data-edit-record="${r.id}">Düzenle</button>
+          <button type="button" class="btn btn-sm btn-quiet" data-doc-record="${r.id}">${docBtnLabel(r.id)}</button>
           <button type="button" class="btn btn-sm btn-quiet btn-danger" data-delete-record="${r.id}">Sil</button>
         </div></td>
       </tr>`;
@@ -309,6 +386,7 @@ function renderOperations() {
         ${r.description ? `<div class="card-notes">${escapeHtml(r.description)}</div>` : ""}
         <div class="card-actions">
           <button type="button" class="btn btn-sm" data-edit-record="${r.id}">Düzenle</button>
+          <button type="button" class="btn btn-sm" data-doc-record="${r.id}">${docBtnLabel(r.id)}</button>
           <button type="button" class="btn btn-sm btn-danger" data-delete-record="${r.id}">Sil</button>
         </div>
       </div>`;
@@ -317,7 +395,7 @@ function renderOperations() {
 }
 
 function docLinkHtml(d) {
-  return `<span class="doc-link"><a href="/api/documents/${d.id}" target="_blank" rel="noopener">${escapeHtml(d.filename)}</a>
+  return `<span class="doc-link"><a href="/api/documents/${d.id}" target="_blank" rel="noopener">${escapeHtml(d.title || d.filename)}</a>
     <button type="button" class="btn btn-sm btn-quiet" data-delete-doc="${d.id}" aria-label="${escapeHtml(d.filename)} belgesini sil">Sil</button></span>`;
 }
 
@@ -356,8 +434,6 @@ function renderLedger() {
               ${ships}
               <div class="company-actions">
                 <button type="button" class="btn btn-sm btn-primary" data-quick-pay-company="${comp.company_id}">Ödeme Ekle</button>
-                <button type="button" class="btn btn-sm" data-pdf-company="company-financial" data-company-id="${comp.company_id}">Mali durum PDF</button>
-                <button type="button" class="btn btn-sm" data-pdf-company="company-detail" data-company-id="${comp.company_id}">Tüm detaylar PDF</button>
               </div>
             </div>
           </details>`;
@@ -374,20 +450,71 @@ function renderLedger() {
           <td>${escapeHtml(p.note || "")}</td>
           <td class="num"><span class="pill curr-${p.currency}">${fmtExactMoney(p.amount, p.currency)}</span></td>
           <td>${state.documents.filter((d) => d.payment_id === p.id).map(docLinkHtml).join("")}
-            <button type="button" class="btn btn-sm" data-add-doc="dekont" data-doc-company="${p.company_id}" data-doc-payment="${p.id}">Dekont ekle</button></td>
+            <button type="button" class="btn btn-sm" data-doc-payment-add="${p.id}">Dekont ekle</button></td>
           <td><button type="button" class="btn btn-sm btn-quiet btn-danger" data-delete-payment="${p.id}">Sil</button></td>
         </tr>`)
         .join("")
     : `<tr class="empty-row"><td colspan="7">Henüz ödeme yok.</td></tr>`;
 
-  const docs = state.documents.filter((d) => !d.payment_id);
-  const names = Object.fromEntries(state.companies.map((c) => [c.id, c.name]));
-  const kindName = { fatura: "Fatura", dekont: "Dekont", diger: "Belge" };
+}
+
+// --- Belgeler ekranı: liste + belge oluştur formu ---
+function renderDocumentsView() {
+  const keepCompany = (id) => (state.companies.some((c) => c.id === Number($(id).value)) ? $(id).value : state.activeCompanyId);
+  const fc = keepCompany("docFilterCompany");
+  $("docFilterCompany").innerHTML = companyOptions(fc);
+  $("docFilterShip").innerHTML = shipOptions(fc, $("docFilterShip").value, "Tüm gemiler");
+
+  const bc = keepCompany("buildCompany");
+  $("buildCompany").innerHTML = companyOptions(bc);
+  renderBuildForm();
+
+  const shipId = Number($("docFilterShip").value) || null;
+  const docs = state.documents.filter((d) => d.company_id === Number(fc) && (!shipId || d.ship_id === shipId));
   $("documentsList").innerHTML = docs.length
-    ? `<table class="data-table"><thead><tr><th>Tür</th><th>Firma</th><th>Dosya</th><th>Tarih</th></tr></thead><tbody>` +
-      docs.map((d) => `<tr><td>${kindName[d.kind] || "Belge"}</td><td>${escapeHtml(names[d.company_id] || "")}</td><td>${docLinkHtml(d)}</td><td>${escapeHtml(isoToDisplay(d.created_at))}</td></tr>`).join("") +
+    ? `<table class="data-table"><thead><tr><th>Başlık</th><th>Tür</th><th>Bağlı olduğu yer</th><th>Açıklama</th><th></th></tr></thead><tbody>` +
+      docs.map((d) => `<tr>
+        <td><a href="/api/documents/${d.id}" target="_blank" rel="noopener">${escapeHtml(d.title || d.filename)}</a>${d.title ? `<br><span class="muted">${escapeHtml(d.filename)}</span>` : ""}</td>
+        <td>${DOC_KIND[d.kind] || "Belge"}</td>
+        <td>${escapeHtml(d.ref_label)}</td>
+        <td>${escapeHtml(d.description)}</td>
+        <td><div class="row-actions">
+          <button type="button" class="btn btn-sm btn-quiet" data-edit-doc="${d.id}">Düzenle</button>
+          <button type="button" class="btn btn-sm btn-quiet btn-danger" data-delete-doc="${d.id}">Sil</button>
+        </div></td></tr>`).join("") +
       `</tbody></table>`
-    : `<p class="hint" style="padding:0.8rem 1rem;margin:0">Henüz belge yok.</p>`;
+    : `<p class="hint" style="padding:0.8rem 1rem;margin:0">Bu seçimde belge yok.</p>`;
+}
+
+// --- Belge ekle / düzenle penceresi ---
+function docScopeLabel(scope) {
+  if (scope.record_id) {
+    const r = state.records.find((x) => x.id === scope.record_id);
+    return r ? `İşlem ${r.tx_date || isoToDisplay(r.effective_date)} ${r.departure || ""} → ${r.arrival || ""}`.replace(/\s+/g, " ") : "İşlem";
+  }
+  if (scope.payment_id) {
+    const p = state.payments.find((x) => x.id === scope.payment_id);
+    return p ? `Ödeme ${isoToDisplay(p.payment_date)} ${fmtExactMoney(p.amount, p.currency)}` : "Ödeme";
+  }
+  if (scope.ship_id) return `Gemi: ${state.ships.find((x) => x.id === scope.ship_id)?.name ?? ""}`;
+  return `Firma: ${state.companies.find((x) => x.id === scope.company_id)?.name ?? ""}`;
+}
+
+function openDocModal(scope, existing = null) {
+  if (!existing && !scope.company_id && !scope.ship_id && !scope.record_id && !scope.payment_id) {
+    return notify("Önce bir firma veya gemi seçin.", true);
+  }
+  state.docScope = scope;
+  state.docEditId = existing ? existing.id : null;
+  $("modalDocTitle").textContent = existing ? "Belgeyi düzenle" : "Belge ekle";
+  $("docScopeLabel").textContent = existing ? existing.ref_label : docScopeLabel(scope);
+  $("docFileField").hidden = !!existing;
+  $("docFile").value = "";
+  $("docFile").required = !existing;
+  $("docKind").value = existing ? existing.kind : scope.payment_id ? "dekont" : scope.company_id && !scope.ship_id ? "fatura" : "diger";
+  $("docTitle").value = existing ? existing.title : "";
+  $("docDescription").value = existing ? existing.description : "";
+  $("modalDoc").showModal();
 }
 
 async function uploadDocument(file, fields) {
@@ -405,7 +532,8 @@ function switchMainView(view) {
   state.activeView = view;
   $("viewOperations").classList.toggle("active", view === "operations");
   $("viewLedger").classList.toggle("active", view === "ledger");
-  for (const [id, v] of [["tabOperations", "operations"], ["tabLedger", "ledger"], ["mNavOperations", "operations"], ["mNavLedger", "ledger"]]) {
+  $("viewDocuments").classList.toggle("active", view === "documents");
+  for (const [id, v] of [["tabOperations", "operations"], ["tabLedger", "ledger"], ["tabDocuments", "documents"], ["mNavOperations", "operations"], ["mNavLedger", "ledger"], ["mNavDocuments", "documents"]]) {
     $(id).classList.toggle("active", view === v);
   }
   window.scrollTo({ top: 0 });
@@ -463,6 +591,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Ekranlar
   for (const id of ["tabOperations", "mNavOperations"]) $(id).addEventListener("click", () => switchMainView("operations"));
   for (const id of ["tabLedger", "mNavLedger"]) $(id).addEventListener("click", () => switchMainView("ledger"));
+  for (const id of ["tabDocuments", "mNavDocuments"]) $(id).addEventListener("click", () => switchMainView("documents"));
 
   // Açık menüleri dışarı tıklayınca kapat
   document.addEventListener("click", (e) => {
@@ -658,11 +787,13 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!confirm("Bu işlem satırını silmek istediğinize emin misiniz?")) return;
         await api(`/api/records/${el.dataset.deleteRecord}`, { method: "DELETE" });
         await refreshAll();
-      } else if ((el = t("[data-pdf]"))) {
-        el.closest("details")?.removeAttribute("open");
-        pdfFor(el.dataset.pdf);
-      } else if ((el = t("[data-pdf-company]"))) {
-        pdfFor(el.dataset.pdfCompany, Number(el.dataset.companyId));
+      } else if ((el = t("[data-doc-record]"))) {
+        openDocModal({ record_id: Number(el.dataset.docRecord) });
+      } else if ((el = t("[data-doc-payment-add]"))) {
+        openDocModal({ payment_id: Number(el.dataset.docPaymentAdd) });
+      } else if ((el = t("[data-edit-doc]"))) {
+        const d = state.documents.find((x) => x.id === Number(el.dataset.editDoc));
+        if (d) openDocModal({}, d);
       } else if ((el = t("[data-quick-pay-company]"))) {
         openPaymentModal(Number(el.dataset.quickPayCompany));
       } else if ((el = t("[data-jump-ship]"))) {
@@ -674,11 +805,6 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!confirm("Bu ödeme kaydını silmek istediğinize emin misiniz?")) return;
         await api(`/api/payments/${el.dataset.deletePayment}`, { method: "DELETE" });
         await refreshAll();
-      } else if ((el = t("[data-add-doc]"))) {
-        const company_id = Number(el.dataset.docCompany) || Number($("ledgerFilterCompany").value) || state.activeCompanyId;
-        if (!company_id) return notify("Önce bir firma seçin.", true);
-        state.pendingDoc = { company_id, payment_id: el.dataset.docPayment, kind: el.dataset.addDoc };
-        $("docFileInput").click();
       } else if ((el = t("[data-delete-doc]"))) {
         if (!confirm("Bu belgeyi silmek istediğinize emin misiniz?")) return;
         await api(`/api/documents/${el.dataset.deleteDoc}`, { method: "DELETE" });
@@ -703,18 +829,39 @@ document.addEventListener("DOMContentLoaded", () => {
     true,
   );
 
-  $("docFileInput").addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    e.target.value = "";
-    if (!file || !state.pendingDoc) return;
+  // Belge ekle / düzenle
+  $("btnShipDoc").addEventListener("click", () => openDocModal({ ship_id: state.activeShipId }));
+  $("btnCompanyDoc").addEventListener("click", () => openDocModal({ company_id: Number($("docFilterCompany").value) || state.activeCompanyId }));
+  $("docFilterCompany").addEventListener("change", () => { $("docFilterShip").innerHTML = ""; renderDocumentsView(); });
+  $("docFilterShip").addEventListener("change", renderDocumentsView);
+
+  $("formDoc").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fields = { kind: $("docKind").value, title: $("docTitle").value, description: $("docDescription").value };
     try {
-      await uploadDocument(file, state.pendingDoc);
-      notify("Belge yüklendi.");
+      if (state.docEditId) {
+        await api(`/api/documents/${state.docEditId}`, { method: "PUT", body: JSON.stringify(fields) });
+      } else {
+        const file = $("docFile").files[0];
+        if (!file) return notify("Bir dosya seçin.", true);
+        // Başlık/açıklama boş olabilir; uploadDocument boş alanları göndermez.
+        await uploadDocument(file, { ...state.docScope, ...fields });
+      }
+      $("modalDoc").close();
+      notify(state.docEditId ? "Belge güncellendi." : "Belge yüklendi.");
       await refreshAll();
     } catch (err) {
       notify(err.message, true);
     }
   });
+
+  // Belge oluştur
+  $("formBuild").addEventListener("submit", submitBuild);
+  $("buildType").addEventListener("change", renderBuildForm);
+  $("buildCompany").addEventListener("change", () => { $("buildShip").innerHTML = ""; renderBuildForm(); });
+  $("buildShip").addEventListener("change", renderBuildAttachments);
+  $("btnAttachAll").addEventListener("click", () => document.querySelectorAll("#buildAttachments input").forEach((i) => (i.checked = true)));
+  $("btnAttachNone").addEventListener("click", () => document.querySelectorAll("#buildAttachments input").forEach((i) => (i.checked = false)));
 
   // Ödeme
   $("btnOpenPaymentModal").addEventListener("click", () => openPaymentModal(null));

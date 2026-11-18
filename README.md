@@ -8,8 +8,8 @@ Gemi acenteleri ve operasyon firmaları için **Firma → Gemi → İşlem Tablo
 
 1. **Firma ve gemi bazlı tablolar:** `Tarih | Kalkış | Varış | Kişi | Transfer | Otel | Yemek | İGAFİ | Vize | Ek | Toplam | Notlar`. Boş tutarlar soluk `–` olarak görünür. `Ek`, Ayakbastı/GBT gibi doğrudan toplama yazılan tutarlar içindir. Notlar serbest metindir.
 2. **Mali durum:** Firma bazında **Yapılan iş**, **Alınan ödeme**, **Kalan**. Para birimleri birbirine çevrilmez, ayrı ayrı izlenir.
-3. **PDF çıktıları:** Tek geminin detayı, firmanın tüm detayları, firmanın mali durumu. Tarih aralığı filtresi PDF'e de uygulanır.
-4. **Belgeler:** Ödemelere dekont, firmalara fatura/belge (PDF, JPG, PNG; en fazla 15 MB) eklenir. Belgeler `veriler.db` içinde saklanır.
+3. **Belgeler ekranı:** Yüklenen belgelerin listesi ve **PDF oluşturma**. Dört tür: gemi maliyet tablosu, firma tüm gemiler, ödeme dökümü, mali durum. İsteğe bağlı başlık, açıklama ve tarih aralığı. Seçilen belgeler (PDF'ler ve resimler) PDF'in sonunda bir "Ekler" dizini ile birlikte birleştirilir; eklenemeyen belge olursa bildirilir.
+4. **Belge yükleme:** Firmaya, gemiye, işlem satırına veya ödemeye bağlanır (PDF, JPG, PNG; en fazla 15 MB). Her belgeye başlık ve açıklama eklenebilir. Belgeler `veriler.db` içinde saklanır.
 5. **Excel'den aktarma:** Mevcut `.xlsx` dosyaları içeri aktarılabilir. Excel çıktısı yoktur.
 6. **Masaüstü + telefon:** Geniş ekranda tablo, dar ekranda kartlar ve alt menü.
 7. **Otomatik güncelleme:** Açılışta GitHub release'indeki `version.json` kontrol edilir; yeni sürüm varsa indirilir, doğrulanır ve uygulama yeniden başlar (yalnızca Windows `.exe`; `NO_UPDATE=1` ile kapatılır).

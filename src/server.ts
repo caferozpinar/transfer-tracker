@@ -1,7 +1,7 @@
 import { AppDatabase, Currency } from "./db.ts";
 import { VERSION } from "./version.ts";
 import { autoUpdate } from "./updater.ts";
-import { companyDetailPdf, companyFinancialPdf, shipDetailPdf } from "./pdf.ts";
+import { buildPdf } from "./pdf.ts";
 import { importRecordsFromXlsx } from "./excel.ts";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,10 +69,6 @@ export function createAppHandler(db: AppDatabase, port = 8080) {
 
       if (path === "/api/version" && method === "GET") {
         return jsonResponse({ version: VERSION });
-      }
-
-      if (path === "/api/autocomplete" && method === "GET") {
-        return jsonResponse(db.getAutocomplete());
       }
 
       if (path === "/api/summary" && method === "GET") {
@@ -231,25 +227,25 @@ export function createAppHandler(db: AppDatabase, port = 8080) {
         return jsonResponse({ ok: true, ...result });
       }
 
-      // Documents (dekont / fatura)
+      // Documents (dekont / fatura / diğer): firma, gemi, işlem veya ödemeye bağlanır
       if (path === "/api/documents" && method === "GET") {
         const n = (k: string) => Number(url.searchParams.get(k)) || undefined;
         return jsonResponse(
-          db.listDocuments({ company_id: n("company_id"), payment_id: n("payment_id"), record_id: n("record_id") }),
+          db.listDocuments({ company_id: n("company_id"), ship_id: n("ship_id"), payment_id: n("payment_id"), record_id: n("record_id") }),
         );
       }
       if (path === "/api/documents" && method === "POST") {
         const form = await req.formData();
         const file = form.get("file");
-        const companyId = Number(form.get("company_id"));
-        if (!(file instanceof File) || !companyId) {
-          return jsonResponse({ error: "Firma ve dosya seçilmelidir." }, 400);
-        }
+        if (!(file instanceof File)) return jsonResponse({ error: "Dosya seçilmelidir." }, 400);
         const created = db.createDocument({
-          company_id: companyId,
+          company_id: Number(form.get("company_id")) || null,
+          ship_id: Number(form.get("ship_id")) || null,
           payment_id: Number(form.get("payment_id")) || null,
           record_id: Number(form.get("record_id")) || null,
           kind: String(form.get("kind") ?? ""),
+          title: String(form.get("title") ?? ""),
+          description: String(form.get("description") ?? ""),
           filename: file.name,
           data: new Uint8Array(await file.arrayBuffer()),
         });
@@ -261,6 +257,10 @@ export function createAppHandler(db: AppDatabase, port = 8080) {
         if (method === "DELETE") {
           db.deleteDocument(id);
           return jsonResponse({ ok: true });
+        }
+        if (method === "PUT") {
+          const body = await req.json();
+          return jsonResponse(db.updateDocument(id, { title: body.title, description: body.description, kind: body.kind }));
         }
         if (method === "GET") {
           const doc = db.getDocumentData(id);
@@ -276,28 +276,29 @@ export function createAppHandler(db: AppDatabase, port = 8080) {
         }
       }
 
-      // PDF çıktıları
-      const pdfMatch = path.match(/^\/api\/pdf\/(ship|company)\/(\d+)(?:\/(detail|financial))?$/);
-      if (pdfMatch && method === "GET") {
-        const id = Number(pdfMatch[2]);
-        const range = {
-          start_date: url.searchParams.get("start_date") || undefined,
-          end_date: url.searchParams.get("end_date") || undefined,
-        };
-        let bytes: Uint8Array;
-        let name: string;
-        if (pdfMatch[1] === "ship") {
-          bytes = await shipDetailPdf(db, publicDir, id, range);
-          name = "gemi-detay.pdf";
-        } else if (pdfMatch[3] === "financial") {
-          bytes = await companyFinancialPdf(db, publicDir, id, range);
-          name = "mali-durum.pdf";
-        } else {
-          bytes = await companyDetailPdf(db, publicDir, id, range);
-          name = "firma-detay.pdf";
-        }
-        return new Response(bytes as Uint8Array<ArrayBuffer>, {
-          headers: { "content-type": "application/pdf", "content-disposition": `attachment; filename="${name}"` },
+      // PDF oluştur: tür + kapsam + seçilen ekler tek PDF'te birleşir
+      if (path === "/api/pdf/build" && method === "POST") {
+        const body = await req.json();
+        const types = ["ship-cost", "company-ships", "payments", "financial"];
+        if (!types.includes(body.type)) return jsonResponse({ error: "Geçersiz belge türü." }, 400);
+        const result = await buildPdf(db, publicDir, {
+          type: body.type,
+          company_id: Number(body.company_id),
+          ship_id: body.ship_id ? Number(body.ship_id) : undefined,
+          start_date: body.start_date || undefined,
+          end_date: body.end_date || undefined,
+          title: body.title,
+          description: body.description,
+          document_ids: Array.isArray(body.document_ids) ? body.document_ids.map(Number) : [],
+        });
+        return new Response(result.bytes as Uint8Array<ArrayBuffer>, {
+          headers: {
+            "content-type": "application/pdf",
+            "content-disposition": `attachment; filename="belge.pdf"`,
+            // Eklenemeyen belgeler istemciye bildirilir (sessizce atlanmaz).
+            "x-skipped-attachments": encodeURIComponent(JSON.stringify(result.skipped)),
+            "access-control-expose-headers": "x-skipped-attachments",
+          },
         });
       }
 

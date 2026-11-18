@@ -82,9 +82,14 @@ export type DocumentKind = "dekont" | "fatura" | "diger";
 export interface DocumentItem {
   id: number;
   company_id: number;
+  ship_id: number | null;
   payment_id: number | null;
   record_id: number | null;
   kind: DocumentKind;
+  title: string; // boşsa dosya adı gösterilir
+  description: string;
+  ship_name: string | null;
+  ref_label: string; // "Gemi: X", "İşlem 25.10.2026 A→B", "Ödeme 01.11.2026 …", "Firma geneli"
   filename: string;
   mime: string;
   size: number;
@@ -248,15 +253,19 @@ export class AppDatabase {
       CREATE TABLE IF NOT EXISTS documents (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         company_id INTEGER NOT NULL,
+        ship_id INTEGER,
         payment_id INTEGER,
         record_id INTEGER,
         kind TEXT NOT NULL DEFAULT 'diger',
+        title TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
         filename TEXT NOT NULL,
         mime TEXT NOT NULL,
         size INTEGER NOT NULL,
         data BLOB NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+        FOREIGN KEY (ship_id) REFERENCES ships(id) ON DELETE CASCADE,
         FOREIGN KEY (payment_id) REFERENCES payments(id) ON DELETE CASCADE,
         FOREIGN KEY (record_id) REFERENCES records(id) ON DELETE CASCADE
       );
@@ -267,6 +276,15 @@ export class AppDatabase {
     for (const col of ["igafi_fee", "vize_fee"]) {
       if (!cols.includes(col)) this.db.exec(`ALTER TABLE records ADD COLUMN ${col} REAL NOT NULL DEFAULT 0`);
     }
+    const docCols = (this.db.prepare("PRAGMA table_info(documents)").all() as unknown as { name: string }[]).map((c) => c.name);
+    if (!docCols.includes("ship_id")) {
+      this.db.exec("ALTER TABLE documents ADD COLUMN ship_id INTEGER REFERENCES ships(id) ON DELETE CASCADE");
+      // Önceden işleme/ödemeye bağlanan belgelerin gemisini doldur
+      this.db.exec(`UPDATE documents SET ship_id = (SELECT ship_id FROM records WHERE records.id = documents.record_id) WHERE record_id IS NOT NULL`);
+      this.db.exec(`UPDATE documents SET ship_id = (SELECT ship_id FROM payments WHERE payments.id = documents.payment_id) WHERE payment_id IS NOT NULL AND ship_id IS NULL`);
+    }
+    if (!docCols.includes("title")) this.db.exec("ALTER TABLE documents ADD COLUMN title TEXT NOT NULL DEFAULT ''");
+    if (!docCols.includes("description")) this.db.exec("ALTER TABLE documents ADD COLUMN description TEXT NOT NULL DEFAULT ''");
   }
 
   close() {
@@ -609,11 +627,15 @@ export class AppDatabase {
   }
 
   // --- Documents (dekont / fatura) ---
+  // Bağlanacak yer tek bir kimlikten çözülür: işlem > ödeme > gemi > firma. Üst kimlikler (gemi, firma) türetilir.
   createDocument(input: {
-    company_id: number;
+    company_id?: number | null;
+    ship_id?: number | null;
     payment_id?: number | null;
     record_id?: number | null;
     kind?: string;
+    title?: string;
+    description?: string;
     filename: string;
     data: Uint8Array;
   }): DocumentItem {
@@ -621,30 +643,93 @@ export class AppDatabase {
     if (input.data.byteLength > MAX_DOCUMENT_BYTES) throw new Error("Dosya 15 MB'tan büyük olamaz.");
     const mime = sniffDocumentMime(input.data);
     if (!mime) throw new Error("Yalnızca PDF, JPG ve PNG yüklenebilir.");
+
+    let company_id = input.company_id ?? null;
+    let ship_id: number | null = null;
+    let payment_id: number | null = null;
+    let record_id: number | null = null;
+    if (input.record_id) {
+      const r = this.db.prepare("SELECT id, ship_id FROM records WHERE id = ?").get(input.record_id) as { id: number; ship_id: number } | undefined;
+      if (!r) throw new Error("İşlem kaydı bulunamadı.");
+      record_id = r.id;
+      ship_id = r.ship_id;
+    } else if (input.payment_id) {
+      const p = this.db.prepare("SELECT id, company_id, ship_id FROM payments WHERE id = ?").get(input.payment_id) as
+        | { id: number; company_id: number; ship_id: number | null }
+        | undefined;
+      if (!p) throw new Error("Ödeme kaydı bulunamadı.");
+      payment_id = p.id;
+      company_id = p.company_id;
+      ship_id = p.ship_id;
+    } else if (input.ship_id) {
+      ship_id = input.ship_id;
+    }
+    if (ship_id) {
+      const sh = this.getShip(ship_id);
+      if (!sh) throw new Error("Gemi bulunamadı.");
+      company_id = sh.company_id;
+    }
+    if (!company_id || !this.listCompanies().some((c) => c.id === company_id)) {
+      throw new Error("Belgenin bağlanacağı firma/gemi/işlem/ödeme bulunamadı.");
+    }
+
     const kind: DocumentKind = input.kind === "dekont" || input.kind === "fatura" ? input.kind : "diger";
     const filename = (input.filename || "belge").replace(/[\\/\r\n"]/g, "_").slice(0, 200);
     const row = this.db.prepare(`
-      INSERT INTO documents (company_id, payment_id, record_id, kind, filename, mime, size, data)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      RETURNING id, company_id, payment_id, record_id, kind, filename, mime, size, created_at
+      INSERT INTO documents (company_id, ship_id, payment_id, record_id, kind, title, description, filename, mime, size, data)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      RETURNING id
     `).get(
-      input.company_id, input.payment_id ?? null, input.record_id ?? null,
-      kind, filename, mime, input.data.byteLength, input.data
-    );
-    return row as unknown as DocumentItem;
+      company_id, ship_id, payment_id, record_id, kind,
+      (input.title ?? "").trim().slice(0, 200), (input.description ?? "").trim().slice(0, 2000),
+      filename, mime, input.data.byteLength, input.data,
+    ) as { id: number };
+    return this.listDocuments({ id: row.id })[0];
   }
 
-  listDocuments(filters?: { company_id?: number; payment_id?: number; record_id?: number }): DocumentItem[] {
+  updateDocument(id: number, input: { title?: string; description?: string; kind?: string }): DocumentItem {
+    const cur = this.listDocuments({ id })[0];
+    if (!cur) throw new Error("Belge bulunamadı.");
+    const kind = input.kind === "dekont" || input.kind === "fatura" || input.kind === "diger" ? input.kind : cur.kind;
+    this.db.prepare("UPDATE documents SET title = ?, description = ?, kind = ? WHERE id = ?").run(
+      (input.title ?? cur.title).trim().slice(0, 200),
+      (input.description ?? cur.description).trim().slice(0, 2000),
+      kind, id,
+    );
+    return this.listDocuments({ id })[0];
+  }
+
+  listDocuments(filters?: { id?: number; company_id?: number; ship_id?: number; payment_id?: number; record_id?: number }): DocumentItem[] {
     const cond: string[] = [];
     const params: number[] = [];
-    if (filters?.company_id) { cond.push("company_id = ?"); params.push(filters.company_id); }
-    if (filters?.payment_id) { cond.push("payment_id = ?"); params.push(filters.payment_id); }
-    if (filters?.record_id) { cond.push("record_id = ?"); params.push(filters.record_id); }
+    for (const [col, v] of [["id", filters?.id], ["company_id", filters?.company_id], ["ship_id", filters?.ship_id], ["payment_id", filters?.payment_id], ["record_id", filters?.record_id]] as const) {
+      if (v) { cond.push(`d.${col} = ?`); params.push(v); }
+    }
     const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
-    return this.db.prepare(`
-      SELECT id, company_id, payment_id, record_id, kind, filename, mime, size, created_at
-      FROM documents ${where} ORDER BY id DESC
-    `).all(...params) as unknown as DocumentItem[];
+    const rows = this.db.prepare(`
+      SELECT d.id, d.company_id, d.ship_id, d.payment_id, d.record_id, d.kind, d.title, d.description,
+             d.filename, d.mime, d.size, d.created_at, s.name AS ship_name,
+             p.payment_date, p.amount AS pay_amount, p.currency AS pay_currency,
+             r.tx_date, r.departure, r.arrival
+      FROM documents d
+      LEFT JOIN ships s ON s.id = d.ship_id
+      LEFT JOIN payments p ON p.id = d.payment_id
+      LEFT JOIN records r ON r.id = d.record_id
+      ${where} ORDER BY d.id DESC
+    `).all(...params) as unknown as Record<string, unknown>[];
+    return rows.map((x) => {
+      let ref = "Firma geneli";
+      if (x.record_id) {
+        const route = x.departure || x.arrival ? ` ${x.departure || "–"} → ${x.arrival || "–"}` : "";
+        ref = `İşlem ${x.tx_date || ""}${route} · ${x.ship_name}`.replace(/\s+/g, " ");
+      } else if (x.payment_id) {
+        ref = `Ödeme ${toDisplayDate(x.payment_date as string)} ${x.pay_amount} ${x.pay_currency}`;
+      } else if (x.ship_id) {
+        ref = `Gemi: ${x.ship_name}`;
+      }
+      const { payment_date: _a, pay_amount: _b, pay_currency: _c, tx_date: _d, departure: _e, arrival: _f, ...rest } = x;
+      return { ...rest, ref_label: ref } as unknown as DocumentItem;
+    });
   }
 
   getDocumentData(id: number): { filename: string; mime: string; data: Uint8Array } | undefined {
@@ -741,27 +826,5 @@ export class AppDatabase {
       overall_paid,
       overall_remaining,
     };
-  }
-
-  // --- Autocomplete suggestions ---
-  getAutocomplete(): {
-    locations: string[];
-    passengers: string[];
-    descriptions: string[];
-  } {
-    const defaultLocations = ["IGA", "ZEYPORT", "SİRKECİ", "TASHAN", "FATİH", "EYLÜL - İGA", "EYLÜL BOT", "FATİH-İGA"];
-    const defaultPassengers = ["2 KİŞİ TEKNİSYEN", "2 KİŞİ AYRILAN", "1 TEKNİSYEN", "1 KİŞİ", "3 KİŞİ"];
-    const defaultDescriptions = ["TRANSFER", "AYAKBASTI", "GBT", "PERSONEL DEĞİŞİMİ", "1 TWIN ROOM", "1 SINGLE ROOM", "OTEL + TRANSFER"];
-
-    const depRows = this.db.prepare("SELECT DISTINCT departure as val FROM records WHERE departure != ''").all() as { val: string }[];
-    const arrRows = this.db.prepare("SELECT DISTINCT arrival as val FROM records WHERE arrival != ''").all() as { val: string }[];
-    const pasRows = this.db.prepare("SELECT DISTINCT passenger_info as val FROM records WHERE passenger_info != ''").all() as { val: string }[];
-    const descRows = this.db.prepare("SELECT DISTINCT description as val FROM records WHERE description != ''").all() as { val: string }[];
-
-    const locations = Array.from(new Set([...defaultLocations, ...depRows.map((r) => r.val), ...arrRows.map((r) => r.val)]));
-    const passengers = Array.from(new Set([...defaultPassengers, ...pasRows.map((r) => r.val)]));
-    const descriptions = Array.from(new Set([...defaultDescriptions, ...descRows.map((r) => r.val)]));
-
-    return { locations, passengers, descriptions };
   }
 }

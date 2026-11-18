@@ -1,6 +1,8 @@
 import { AppDatabase } from "../src/db.ts";
 import { createZipArchive, importRecordsFromXlsx, parseMoneyAndCurrency } from "../src/excel.ts";
 import { createAppHandler } from "../src/server.ts";
+import { buildPdf } from "../src/pdf.ts";
+import { PDFDocument } from "pdf-lib";
 import { checkForUpdate, compareVersions, downloadVerified, sha256Hex, validateManifest } from "../src/updater.ts";
 
 function assertEquals<T>(actual: T, expected: T, msg = "") {
@@ -188,44 +190,91 @@ Deno.test("4. Para Birimi Hücre Ayrıştırıcı (parseMoneyAndCurrency) ve HTT
   }
 });
 
-Deno.test("5. Belge Yükleme: Tür Doğrulama, Sınır ve Silme Zinciri", () => {
+Deno.test("5. Belge Yükleme: Kapsam Türetme (firma/gemi/işlem/ödeme), Başlık/Açıklama, Doğrulama", () => {
   const db = new AppDatabase(":memory:");
   try {
-    const { company_id } = seedSample(db);
-    const pay = db.createPayment({ company_id, payment_date: "2026-11-01", amount: 100, currency: "TRY" });
+    const { company_id, ship_id } = seedSample(db);
+    const rec = db.listRecords({ ship_id })[0];
+    const pay = db.createPayment({ company_id, ship_id, payment_date: "2026-11-01", amount: 100, currency: "TRY" });
     const pdf = new TextEncoder().encode("%PDF-1.4 test");
-    const doc = db.createDocument({ company_id, payment_id: pay.id, kind: "dekont", filename: "a/b.pdf", data: pdf });
-    assertEquals(doc.mime, "application/pdf");
-    assertEquals(doc.filename, "a_b.pdf");
-    assertEquals(db.listDocuments({ payment_id: pay.id }).length, 1);
 
-    let rejected = false;
-    try {
-      db.createDocument({ company_id, filename: "x.pdf", data: new TextEncoder().encode("<html>") });
-    } catch (_) {
-      rejected = true;
+    const fDoc = db.createDocument({ company_id, kind: "fatura", filename: "f.pdf", data: pdf });
+    assertEquals([fDoc.ship_id, fDoc.ref_label], [null, "Firma geneli"]);
+
+    const sDoc = db.createDocument({ ship_id, kind: "diger", filename: "g.pdf", data: pdf, title: "Gemi evrakı", description: "not" });
+    assertEquals([sDoc.company_id, sDoc.title, sDoc.description, sDoc.ref_label], [company_id, "Gemi evrakı", "not", "Gemi: MV ATLAS"]);
+
+    const rDoc = db.createDocument({ record_id: rec.id, filename: "r.pdf", data: pdf });
+    assertEquals([rDoc.ship_id, rDoc.company_id], [ship_id, company_id]); // işlemden türetilir
+    assertEquals(rDoc.ref_label.startsWith("İşlem 25.10.2026"), true);
+
+    const pDoc = db.createDocument({ payment_id: pay.id, kind: "dekont", filename: "a/b.pdf", data: pdf });
+    assertEquals([pDoc.filename, pDoc.ship_id, pDoc.kind], ["a_b.pdf", ship_id, "dekont"]);
+
+    assertEquals(db.listDocuments({ ship_id }).length, 3, "gemi, işlem ve gemiye bağlı ödeme belgeleri");
+    assertEquals(db.updateDocument(fDoc.id, { title: "Yeni", description: "" }).title, "Yeni");
+
+    let rejected = 0;
+    for (const bad of [{ company_id, filename: "x", data: new TextEncoder().encode("<html>") }, { filename: "x", data: pdf }]) {
+      try { db.createDocument(bad); } catch (_) { rejected++; }
     }
-    assertEquals(rejected, true, "PDF/JPG/PNG dışı reddedilmeli");
+    assertEquals(rejected, 2, "PDF/JPG/PNG dışı ve bağlanacak yeri olmayan belge reddedilmeli");
 
     db.deletePayment(pay.id); // ödeme silinince belgesi de silinir
-    assertEquals(db.listDocuments({ company_id }).length, 0);
+    db.deleteRecord(rec.id);
+    assertEquals(db.listDocuments({ company_id }).length, 2);
   } finally {
     db.close();
   }
 });
 
-Deno.test("6. PDF Çıktıları (gemi, firma detay, mali durum) Geçerli PDF Üretir", async () => {
+const PNG_1X1 = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+
+Deno.test("6. PDF Oluşturma: 4 tür, varsayılan başlık, sonda ekler (PDF + resim), eklenemeyen belge raporu", async () => {
   const db = new AppDatabase(":memory:");
   try {
     const { company_id, ship_id } = seedSample(db);
     db.createPayment({ company_id, payment_date: "2026-11-01", amount: 5000, currency: "TRY", note: "Şişli ödeme çğıöşü" });
-    const handler = createAppHandler(db, 8080);
-    for (const p of [`ship/${ship_id}`, `company/${company_id}/detail`, `company/${company_id}/financial`]) {
-      const res = await handler(new Request(`http://localhost:8080/api/pdf/${p}`));
-      assertEquals(res.status, 200, p);
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      assertEquals(new TextDecoder().decode(bytes.slice(0, 5)), "%PDF-", p);
+    const pub = new URL("../public", import.meta.url).pathname;
+
+    // 4 tür geçerli PDF üretir; başlık boşsa varsayılan metin kullanılır
+    const titles: Record<string, string> = {
+      "ship-cost": "MV ATLAS – Maliyet Tablosu", "company-ships": "TEST FİRMA – Tüm Gemiler",
+      "payments": "TEST FİRMA / MV ATLAS – Ödeme Dökümü", "financial": "TEST FİRMA – Mali Durum",
+    };
+    let basePages = 0;
+    for (const [type, title] of Object.entries(titles)) {
+      const r = await buildPdf(db, pub, { type: type as never, company_id, ship_id });
+      assertEquals(new TextDecoder().decode(r.bytes.slice(0, 5)), "%PDF-", type);
+      assertEquals((await PDFDocument.load(r.bytes)).getTitle(), title, type);
+      if (type === "financial") basePages = (await PDFDocument.load(r.bytes)).getPageCount();
     }
+    assertEquals((await PDFDocument.load((await buildPdf(db, pub, { type: "financial", company_id, title: "Özel Başlık", description: "Açıklama\nikinci satır" })).bytes)).getTitle(), "Özel Başlık");
+
+    // Ekler: gerçek bir PDF (basePages sayfa) + PNG + bozuk PDF
+    const base = (await buildPdf(db, pub, { type: "financial", company_id })).bytes;
+    const dPdf = db.createDocument({ company_id, kind: "dekont", filename: "dekont.pdf", data: base, title: "Dekont 1" });
+    const dPng = db.createDocument({ company_id, kind: "fatura", filename: "fatura.png", data: PNG_1X1 });
+    const dBad = db.createDocument({ company_id, filename: "bozuk.pdf", data: new TextEncoder().encode("%PDF-1.4 bozuk") });
+    const withDocs = await buildPdf(db, pub, { type: "financial", company_id, document_ids: [dPdf.id, dPng.id, dBad.id] });
+    // kendi sayfalar + 1 dizin + ek PDF sayfaları + 1 resim sayfası; bozuk olan sayfa eklemez
+    assertEquals((await PDFDocument.load(withDocs.bytes)).getPageCount(), basePages + 1 + basePages + 1);
+    assertEquals(withDocs.skipped.map((s) => s.id), [dBad.id]);
+
+    // Başka firmanın belgesi eklenemez
+    const other = db.createCompany("DİĞER");
+    const foreign = db.createDocument({ company_id: other.id, filename: "x.png", data: PNG_1X1 });
+    let rejected = false;
+    try { await buildPdf(db, pub, { type: "financial", company_id, document_ids: [foreign.id] }); } catch (_) { rejected = true; }
+    assertEquals(rejected, true, "başka firmanın belgesi reddedilmeli");
+
+    // HTTP uç noktası
+    const res = await createAppHandler(db, 8080)(new Request("http://localhost/api/pdf/build", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "ship-cost", company_id, ship_id, document_ids: [dBad.id] }),
+    }));
+    assertEquals(res.status, 200);
+    assertEquals(JSON.parse(decodeURIComponent(res.headers.get("x-skipped-attachments")!)).length, 1);
   } finally {
     db.close();
   }
